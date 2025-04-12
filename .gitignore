@@ -25,3 +25,5 @@ cache_RN50/
 *.npy
 *.gif
 ffig.pdf
+
+.venv/
