@@ -26,4 +26,5 @@ cache_RN50/
 *.gif
 ffig.pdf
 
-.venv/
+.venv
+.venv/*
