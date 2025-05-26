@@ -84,6 +84,7 @@ def get_zeroshot_classifier(args, clip_model, virtual_classes=None, virtual_rati
 def eval(args):
     args.freeze_encoder = True
     if args.load is not None:
+        print(f"Loading classifier from {args.load}")
         classifier = ImageClassifier.load(args.load)
     else:
         image_encoder = CLIPEncoder(args, keep_lang=True)

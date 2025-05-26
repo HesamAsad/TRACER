@@ -49,7 +49,7 @@ class ImageNet:
         preprocess,
         location=os.path.expanduser('~/data'),
         batch_size=32,
-        num_workers=32,
+        num_workers=4,
         classnames='openai',
         custom=False,
         method=None,

@@ -22,10 +22,80 @@ from src.datasets_.laion import get_data
 import src.datasets_ as datasets
 
 
-def carot_loss(args, clip_encoder, classification_head, logger):
+def lid_mom_est(data, reference, k, get_idx=False, 
+                compute_mode='use_mm_for_euclid_dist_if_necessary'):
+    """
+    Method of Moments estimation of Local Intrinsic Dimensionality (LID)
+    
+    Args:
+        data: representations that need LID to be estimated
+        reference: reference representations (usually the same batch)
+        k: locality parameter, the neighbourhood size
+        get_idx: whether to return indices of nearest neighbors
+        compute_mode: computation mode for cdist
+    
+    Returns:
+        lids: estimated LID values for each sample
+    """
+    b = data.shape[0]
+    k = min(k, b-2)
+    data = torch.flatten(data, start_dim=1)
+    reference = torch.flatten(reference, start_dim=1)
+    
+    # Compute pairwise distances
+    r = torch.cdist(data, reference, p=2, compute_mode=compute_mode)
+    
+    # Sort distances and get k nearest neighbors
+    a, idx = torch.sort(r, dim=1)
+    
+    # Compute mean distance to k nearest neighbors (excluding self)
+    m = torch.mean(a[:, 1:k+1], dim=1)
+    
+    # Estimate LID using method of moments
+    lids = m / (a[:, k+1] - m)
+    
+    # Handle potential numerical issues
+    lids = torch.clamp(lids, min=1e-8)
+    
+    if get_idx:
+        return idx, lids
+    return lids
+
+
+def compute_ldreg_loss(features, k=64, reg_type="l1"):
+    """
+    Compute LID regularization loss
+    
+    Args:
+        features: representation features
+        k: number of nearest neighbors
+        reg_type: type of regularization ("l1" or "l2")
+    
+    Returns:
+        ldreg_loss: LID regularization loss
+        mean_lid: mean LID value for logging
+    """
+    # Estimate LID for the batch
+    lids = lid_mom_est(data=features, reference=features.detach(), k=k)
+    
+    # Compute regularization loss based on type
+    if reg_type == "l1":
+        ldreg_loss = -torch.log(lids).mean()
+    elif reg_type == "l2":
+        ldreg_loss = -torch.sqrt(torch.square(torch.log(lids))).mean()
+    else:
+        raise ValueError(f"Unknown regularization type: {reg_type}")
+    
+    # Compute geometric mean of LID for logging
+    mean_lid = torch.exp(torch.log(lids).mean())
+    
+    return ldreg_loss, mean_lid.item()
+
+
+def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
     assert args.train_dataset is not None, "Please provide a training dataset."
 
-    logger.info("Fine-tuning Using carot Loss")
+    logger.info("Fine-tuning Using CaRot Loss with LDReg")
     model = clip_encoder
     input_key = "images"
     preprocess_fn = clip_encoder.train_preprocess
@@ -51,14 +121,13 @@ def carot_loss(args, clip_encoder, classification_head, logger):
 
     fp16_scaler = None
     if args.use_fp16:
-        fp16_scaler = torch.cuda.amp.GradScaler()
+        fp16_scaler = torch.amp.GradScaler('cuda')
 
     if args.clip_load is not None:
         model = model.load(args.clip_load)
 
     if args.distil_coef:
         import copy
-
         teacher_enc = copy.deepcopy(model).cuda()
 
     model = model.cuda()
@@ -98,6 +167,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
     stats = []
     prev_num_logits = 0
     labels_ = {}
+    
     #! inference flag
     if args.epochs == 0:
         epoch = 0
@@ -120,6 +190,8 @@ def carot_loss(args, clip_encoder, classification_head, logger):
         epoch_stats = {}
         epoch_stats["epoch"] = epoch
         id_carot_loss_sum = 0
+        ldreg_loss_sum = 0
+        mean_lid_sum = 0
         model.train()
         model = model.cuda()
         classification_head.train()
@@ -142,7 +214,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
             ft_image, ft_text = ft_batch
             ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
             
-            with torch.cuda.amp.autocast(fp16_scaler is not None):
+            with torch.amp.autocast('cuda', fp16_scaler is not None):
                 ft_image_features, ft_text_features, logit_scale2 = model(
                     ft_image, ft_text
                 )
@@ -169,11 +241,24 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                         covv = model.module.model.visual.proj.T @ model.module.model.visual.proj
                     ft_clip_loss += args.l_orth_wv * ((covv - torch.eye(covv.shape[0], device=covv.device))**2).sum()**(1/2)
 
+                #! LDReg regularization
+                ldreg_loss, mean_lid = 0.0, 0.0
+                if args.ldreg_coef > 0:
+                    # Compute LID regularization on image features
+                    ldreg_loss, mean_lid = compute_ldreg_loss(
+                        ft_image_features, 
+                        k=args.ldreg_k, 
+                        reg_type=args.ldreg_type
+                    )
+                    ft_clip_loss += args.ldreg_coef * ldreg_loss
+                    ldreg_loss_sum += ldreg_loss.item()
+                    mean_lid_sum += mean_lid
+
             #! self-distillation flag
             dist_loss, m = torch.tensor(0), 0.0
             if args.distil_coef:
                 if step > 0:
-                    with torch.cuda.amp.autocast(fp16_scaler is not None):
+                    with torch.amp.autocast('cuda', fp16_scaler is not None):
                         with torch.no_grad():
                             (
                                 ft_image_features_t,
@@ -237,69 +322,90 @@ def carot_loss(args, clip_encoder, classification_head, logger):
 
             if i % print_every == 0:
                 percent_complete = 100 * i / num_batches
-                logger.info(
+                log_msg = (
                     f"Train Epoch: {epoch} [{percent_complete:.0f}% {i}/{num_batches}]\t"
                     f"ID Loss: {ft_clip_loss.item():.4f}"
                 )
-                wandb.log({
+                if args.ldreg_coef > 0:
+                    log_msg += f"\tLDReg Loss: {ldreg_loss:.4f}\tMean LID: {mean_lid:.2f}"
+                logger.info(log_msg)
+                
+                wandb_log = {
                     "Train Epoch": epoch,
                     "Percent Complete": percent_complete,
                     "ID Loss": ft_clip_loss.item(),
-                })
+                }
+                if args.ldreg_coef > 0:
+                    wandb_log.update({
+                        "LDReg Loss": ldreg_loss,
+                        "Mean LID": mean_lid,
+                    })
+                wandb.log(wandb_log)
 
-    id_carot_loss_avg = id_carot_loss_sum / num_batches
+        id_carot_loss_avg = id_carot_loss_sum / num_batches
+        if args.ldreg_coef > 0:
+            ldreg_loss_avg = ldreg_loss_sum / num_batches
+            mean_lid_avg = mean_lid_sum / num_batches
 
-    # Evaluate
-    args.current_epoch = epoch
-    classification_head_new = get_zeroshot_classifier(args, model.module.model)
-    classification_head_new = classification_head_new.cuda()
+        # Evaluate
+        args.current_epoch = epoch
+        classification_head_new = get_zeroshot_classifier(args, model.module.model)
+        classification_head_new = classification_head_new.cuda()
 
-    # eval_results = evaluate(model, args, classification_head_new, epoch_stats, logger)
+        # Saving model
+        if args.save is not None:
+            os.makedirs(args.save, exist_ok=True)
+            model_path = os.path.join(args.save, f"checkpoint_{epoch+1}.pt")
+            logger.info("Saving model to" + str(model_path))
+            model.module.save(model_path)
 
-    # Saving model
-    if args.save is not None:
-        os.makedirs(args.save, exist_ok=True)
-        model_path = os.path.join(args.save, f"checkpoint_{epoch+1}.pt")
-        logger.info("Saving model to" + str(model_path))
-        model.module.save(model_path)
+            #! save the EMA teacher
+            if args.distil_coef:
+                ema_model_path = os.path.join(args.save, f"checkpoint_{epoch+1}_EMA.pt")
+                logger.info("Saving model to" + str(ema_model_path))
+                try:
+                    teacher_enc.save(ema_model_path)
+                except:
+                    print("============================")
+                    print("error occurred during EMA model saving")
+                    print("============================")
 
-        #! save the EMA teacher
-        ema_model_path = os.path.join(args.save, f"checkpoint_{epoch+1}_EMA.pt")
-        logger.info("Saving model to" + str(ema_model_path))
-        try:
-            teacher_enc.save(ema_model_path)
-        except:
-            print("============================")
-            print("error occurred during EMA model saving")
-            print("============================")
+            optim_path = os.path.join(args.save, f"optim_{epoch+1}.pt")
+            torch.save(optimizer.state_dict(), optim_path)
 
-        optim_path = os.path.join(args.save, f"optim_{epoch+1}.pt")
-        torch.save(optimizer.state_dict(), optim_path)
+        evaluate(model, args, classification_head_new, epoch_stats, logger)
 
-    evaluate(model, args, classification_head_new, epoch_stats, logger)
+        logger.info(f"Avg ID CaRot Loss : {id_carot_loss_avg:.4f}")
+        epoch_stats["Avg ID CaRot Loss"] = round(id_carot_loss_avg, 4)
+        
+        if args.ldreg_coef > 0:
+            logger.info(f"Avg LDReg Loss : {ldreg_loss_avg:.4f}")
+            logger.info(f"Avg Mean LID : {mean_lid_avg:.2f}")
+            epoch_stats["Avg LDReg Loss"] = round(ldreg_loss_avg, 4)
+            epoch_stats["Avg Mean LID"] = round(mean_lid_avg, 2)
+        
+        stats.append(epoch_stats)
+        stats_df = pd.DataFrame(stats)
+        log_dir = (
+            "expt_logs/"
+            + args.exp_name
+            + "/"
+            + "_BS"
+            + str(args.batch_size)
+            + "_WD"
+            + str(args.wd)
+            + "_LR"
+            + str(args.lr)
+            + "_LDReg"
+            + str(args.ldreg_coef)
+            + "_run"
+            + str(args.run)
+        )
+        os.makedirs(log_dir, exist_ok=True)
+        stats_df.to_csv(log_dir + "/stats.tsv", sep="\t")
 
-    logger.info(f"Avg ID carot Loss : {id_carot_loss_avg:.4f}")
-    epoch_stats["Avg ID carot Loss"] = round(id_carot_loss_avg, 4)
-    stats.append(epoch_stats)
-    stats_df = pd.DataFrame(stats)
-    log_dir = (
-        "expt_logs/"
-        + args.exp_name
-        + "/"
-        + "_BS"
-        + str(args.batch_size)
-        + "_WD"
-        + str(args.wd)
-        + "_LR"
-        + str(args.lr)
-        + "_run"
-        + str(args.run)
-    )
-    os.makedirs(log_dir, exist_ok=True)
-    stats_df.to_csv(log_dir + "/stats.tsv", sep="\t")
-
-    #! wandb logging
-    wandb.log({k: v for k, v in epoch_stats.items()})
+        #! wandb logging
+        wandb.log({k: v for k, v in epoch_stats.items()})
 
     if args.save is not None:
         return model_path

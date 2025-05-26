@@ -5,6 +5,7 @@ import torch
 from src.models.eval import evaluate
 from src.models.ft_loss import finetune
 from src.models.carot_loss import carot_loss
+from src.models.carot_ldreg import carot_ldreg_loss
 from src.models.ce_ablation import ce_ablation
 from src.models.modeling import ClassificationHead, CLIPEncoder, ImageClassifier
 from src.models.utils import fisher_load
@@ -44,18 +45,11 @@ def main(args):
     mod_flag = modelname_generator(args.model)
 
     os.makedirs(args.save + args.exp_name, exist_ok=True)
-    if args.adv_training:
-        args.save = args.save + args.exp_name + "/" + f"{mod_flag}" + '_ep' + str(args.epochs) + "_BS" + str(
-            args.batch_size) + "_WD" + str(args.wd) + "_LR" + str(args.lr) + "_D" + str(args.distil_coef) + "_OC" +str(args.l_orth_wv) + "_run" + str(args.run)
-        os.makedirs("expt_logs/" + args.exp_name, exist_ok=True)
-        logging_path = "expt_logs/" + args.exp_name + "/" + f"{mod_flag}" + '_ep' + str(args.epochs) + "_BS" + str(
-            args.batch_size) + "_WD" + str(args.wd) + "_LR" + str(args.lr) + "_D" + str(args.distil_coef) + "_OC" +str(args.l_orth_wv) + "_run" + str(args.run)
-    else:
-        args.save = args.save + args.exp_name + "/" + f"{mod_flag}" + '_ep' + str(args.epochs) + "_BS" + str(
-            args.batch_size) + "_WD" + str(args.wd) + "_LR" + str(args.lr) + "_D" + str(args.distil_coef) + "_OC" +str(args.l_orth_wv) + "_run" + str(args.run)
-        os.makedirs("expt_logs/" + args.exp_name, exist_ok=True)
-        logging_path = "expt_logs/" + args.exp_name + "/" + f"{mod_flag}" + '_ep' + str(args.epochs) + "_BS" + str(
-            args.batch_size) + "_WD" + str(args.wd) + "_LR" + str(args.lr) + "_D" + str(args.distil_coef) + "_OC" +str(args.l_orth_wv) + "_run" + str(args.run)
+    args.save = args.save + args.exp_name + "/" + f"{mod_flag}" + '_ep' + str(args.epochs) + "_BS" + str(
+        args.batch_size) + "_WD" + str(args.wd) + "_LR" + str(args.lr) + "_D" + str(args.distil_coef) + "_OC" +str(args.l_orth_wv) + "_run" + str(args.run)
+    os.makedirs("expt_logs/" + args.exp_name, exist_ok=True)
+    logging_path = "expt_logs/" + args.exp_name + "/" + f"{mod_flag}" + '_ep' + str(args.epochs) + "_BS" + str(
+        args.batch_size) + "_WD" + str(args.wd) + "_LR" + str(args.lr) + "_D" + str(args.distil_coef) + "_OC" +str(args.l_orth_wv) + "_run" + str(args.run)
 
     
     os.makedirs(logging_path, exist_ok=True)
@@ -99,6 +93,9 @@ def main(args):
         delattr(clip_encoder.model, 'transformer')
         image_clf = ImageClassifier(clip_encoder, classification_head, process_images=False)
         finetuned_checkpoint = finetune(args, image_clf)
+    elif args.method == 'carot_ldreg':
+        finetuned_checkpoint = carot_ldreg_loss(args, clip_encoder,
+                                                 classification_head, logger)
     else:
         finetuned_checkpoint = carot_loss(args, clip_encoder,
                                             classification_head, logger)

@@ -182,7 +182,7 @@ def parse_arguments():
 
     parser.add_argument("--workers",
                         type=int,
-                        default=16,
+                        default=4,
                         help="Number of dataloader workers per GPU.")
 
     parser.add_argument("--csv-separator",
@@ -321,6 +321,28 @@ def parse_arguments():
         type=int,
         default=0,
         help="temperature scaling",
+    )
+
+    parser.add_argument(
+        "--ldreg_coef",
+        type=float,
+        default=0.0,
+        help="coefficient for LID regularization loss (beta in LDReg paper)",
+    )
+
+    parser.add_argument(
+        "--ldreg_k",
+        type=int,
+        default=64,
+        help="number of nearest neighbors for LID estimation",
+    )
+
+    parser.add_argument(
+        "--ldreg_type",
+        type=str,
+        default="l1",
+        choices=["l1", "l2"],
+        help="type of LID regularization (l1 or l2)",
     )
 
     parsed_args = parser.parse_args()
