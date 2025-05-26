@@ -29,3 +29,6 @@ python src/main.py \
 --cross_fnorm 0.05 --l_orth_wv $oc --distil_coef $sd \
 --ldreg_coef $LDREG_COEF --ldreg_k $LDREG_K --ldreg_type $LDREG_TYPE \
 --wb_project "clip_finetune" --method $method --use_fp16 ${fp16}
+
+done
+done
