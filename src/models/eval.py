@@ -65,7 +65,7 @@ def eval_single_dataset(
         if 'image_paths' in data:
             image_paths = data['image_paths']
         
-        with torch.no_grad():
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16 if args.use_fp16 else torch.float32), torch.no_grad():
             logits = utils.get_logits(x, model, classification_head)
 
         projection_fn = getattr(dataset, 'project_logits', None)

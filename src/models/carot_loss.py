@@ -31,7 +31,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
     preprocess_fn = clip_encoder.train_preprocess
     image_enc = None
     clip_encoder.process_images = True
-    print_every = 100
+    print_every = 5
 
     dataset_class = getattr(datasets, args.train_dataset)
     print(f"Training dataset {args.train_dataset}")
@@ -51,7 +51,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
 
     fp16_scaler = None
     if args.use_fp16:
-        fp16_scaler = torch.cuda.amp.GradScaler()
+        fp16_scaler = torch.amp.GradScaler('cuda')
 
     if args.clip_load is not None:
         model = model.load(args.clip_load)
@@ -116,10 +116,15 @@ def carot_loss(args, clip_encoder, classification_head, logger):
         exit()
 
     for epoch in tqdm(range(0, args.epochs), desc="Epochs"):
-        print("Epoch : ", epoch)
+        print("\nEpoch : ", epoch)
         epoch_stats = {}
         epoch_stats["epoch"] = epoch
+        # Initialize tracking variables for epoch statistics
         id_carot_loss_sum = 0
+        fnorm_loss_sum = 0
+        orth_loss_sum = 0
+        dist_loss_sum = 0
+        clip_loss_sum = 0
         model.train()
         model = model.cuda()
         classification_head.train()
@@ -142,7 +147,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
             ft_image, ft_text = ft_batch
             ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
             
-            with torch.cuda.amp.autocast(fp16_scaler is not None):
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32):
                 ft_image_features, ft_text_features, logit_scale2 = model(
                     ft_image, ft_text
                 )
@@ -159,7 +164,10 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                         cov_vl = model.module.model.visual.attnpool.c_proj.weight.T @ model.module.model.text_projection.T
                     else:
                         cov_vl = model.module.model.visual.proj @ model.module.model.text_projection.T
-                    ft_clip_loss += args.cross_fnorm * torch.linalg.norm(cov_vl, ord='fro')
+                    fnorm_val = torch.linalg.norm(cov_vl, ord='fro')
+                    ft_clip_loss += args.cross_fnorm * fnorm_val
+                    fnorm_val = fnorm_val.item()
+                    fnorm_loss_sum += args.cross_fnorm * fnorm_val
 
                 #* orthogonality constraint
                 if args.l_orth_wv:
@@ -167,13 +175,16 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                         covv = model.module.model.visual.attnpool.c_proj.weight.T @ model.module.model.visual.attnpool.c_proj
                     else:
                         covv = model.module.model.visual.proj.T @ model.module.model.visual.proj
-                    ft_clip_loss += args.l_orth_wv * ((covv - torch.eye(covv.shape[0], device=covv.device))**2).sum()**(1/2)
+                    orth_val = ((covv - torch.eye(covv.shape[0], device=covv.device))**2).sum()**(1/2)
+                    ft_clip_loss += args.l_orth_wv * orth_val
+                    orth_val = orth_val.item()
+                    orth_loss_sum += args.l_orth_wv * orth_val
 
             #! self-distillation flag
             dist_loss, m = torch.tensor(0), 0.0
             if args.distil_coef:
                 if step > 0:
-                    with torch.cuda.amp.autocast(fp16_scaler is not None):
+                    with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32):
                         with torch.no_grad():
                             (
                                 ft_image_features_t,
@@ -201,6 +212,8 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                         ).mean()
                         
                         ft_clip_loss += args.distil_coef * dist_loss
+                        if isinstance(dist_loss, torch.Tensor):
+                            dist_loss_sum += args.distil_coef * dist_loss.item()
 
             if fp16_scaler is None:
                 ft_clip_loss.backward()
@@ -233,73 +246,159 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                                 (1 - m) * param_q.detach().data
                             )
 
+            # Track base CLIP loss
+            base_clip_loss = ft_clip_loss.item()
+            if args.cross_fnorm:
+                base_clip_loss -= args.cross_fnorm * fnorm_val
+            if args.l_orth_wv:
+                base_clip_loss -= args.l_orth_wv * orth_val
+            if args.distil_coef and isinstance(dist_loss, torch.Tensor):
+                base_clip_loss -= args.distil_coef * dist_loss.item()
+            clip_loss_sum += base_clip_loss
+
             id_carot_loss_sum += ft_clip_loss.item()
 
             if i % print_every == 0:
                 percent_complete = 100 * i / num_batches
-                logger.info(
-                    f"Train Epoch: {epoch} [{percent_complete:.0f}% {i}/{num_batches}]\t"
-                    f"ID Loss: {ft_clip_loss.item():.4f}"
+                
+                # Prepare detailed log message
+                log_msg = (
+                    f"Train Epoch: {epoch} [{percent_complete:.0f}% {i}/{num_batches}]\n"
+                    f"\tTotal Loss: {ft_clip_loss.item():.4f}\n"
+                    f"\tCLIP Loss: {base_clip_loss:.4f}"
                 )
-                wandb.log({
+                
+                # Prepare wandb log dict
+                wandb_log = {
                     "Train Epoch": epoch,
                     "Percent Complete": percent_complete,
-                    "ID Loss": ft_clip_loss.item(),
-                })
+                    "Total Loss": ft_clip_loss.item(),
+                    "CLIP Loss": base_clip_loss,
+                }
+                
+                # Add cross_fnorm loss if applicable
+                if args.cross_fnorm:
+                    log_msg += f"\n\tCross F-norm Loss: {args.cross_fnorm * fnorm_val:.4f} (F-norm: {fnorm_val:.4f})"
+                    wandb_log.update({
+                        "Cross F-norm Loss": args.cross_fnorm * fnorm_val,
+                        "F-norm Value": fnorm_val,
+                    })
+                
+                # Add orthogonality loss if applicable
+                if args.l_orth_wv:
+                    log_msg += f"\n\tOrthogonality Loss: {args.l_orth_wv * orth_val:.4f} (Orth: {orth_val:.4f})"
+                    wandb_log.update({
+                        "Orthogonality Loss": args.l_orth_wv * orth_val,
+                        "Orthogonality Value": orth_val,
+                    })
+                
+                # Add distillation loss if applicable
+                if args.distil_coef and isinstance(dist_loss, torch.Tensor):
+                    log_msg += f"\n\tDistillation Loss: {args.distil_coef * dist_loss.item():.4f} (Raw: {dist_loss.item():.4f})"
+                    log_msg += f"\n\tEMA momentum: {m:.4f}"
+                    wandb_log.update({
+                        "Distillation Loss": args.distil_coef * dist_loss.item(),
+                        "Distillation Raw Loss": dist_loss.item(),
+                        "EMA Momentum": m,
+                    })
+                
+                # Add learning rate
+                current_lr = optimizer.param_groups[0]['lr']
+                log_msg += f"\n\tLearning Rate: {current_lr:.6f}"
+                wandb_log.update({"Learning Rate": current_lr})
+                
+                # Add logit scale
+                log_msg += f"\n\tLogit Scale: {lscale.exp().item():.4f}"
+                wandb_log.update({"Logit Scale": lscale.exp().item()})
+                
+                logger.info(log_msg)
+                wandb.log(wandb_log)
 
-    id_carot_loss_avg = id_carot_loss_sum / num_batches
+        # Compute averages at the end of each epoch
+        id_carot_loss_avg = id_carot_loss_sum / num_batches
+        clip_loss_avg = clip_loss_sum / num_batches
 
-    # Evaluate
-    args.current_epoch = epoch
-    classification_head_new = get_zeroshot_classifier(args, model.module.model)
-    classification_head_new = classification_head_new.cuda()
+        # Update epoch stats with all metrics
+        epoch_stats["Avg Total Loss"] = round(id_carot_loss_avg, 4)
+        epoch_stats["Avg CLIP Loss"] = round(clip_loss_avg, 4)
 
-    # eval_results = evaluate(model, args, classification_head_new, epoch_stats, logger)
+        logger.info(f"Epoch {epoch} Summary:")
+        logger.info(f"  Avg Total Loss: {id_carot_loss_avg:.4f}")
+        logger.info(f"  Avg CLIP Loss: {clip_loss_avg:.4f}")
 
-    # Saving model
-    if args.save is not None:
-        os.makedirs(args.save, exist_ok=True)
-        model_path = os.path.join(args.save, f"checkpoint_{epoch+1}.pt")
-        logger.info("Saving model to" + str(model_path))
-        model.module.save(model_path)
+        if args.cross_fnorm:
+            fnorm_loss_avg = fnorm_loss_sum / num_batches
+            epoch_stats["Avg Cross F-norm Loss"] = round(fnorm_loss_avg, 4)
+            logger.info(f"  Avg Cross F-norm Loss: {fnorm_loss_avg:.4f}")
 
-        #! save the EMA teacher
-        ema_model_path = os.path.join(args.save, f"checkpoint_{epoch+1}_EMA.pt")
-        logger.info("Saving model to" + str(ema_model_path))
-        try:
-            teacher_enc.save(ema_model_path)
-        except:
-            print("============================")
-            print("error occurred during EMA model saving")
-            print("============================")
+        if args.l_orth_wv:
+            orth_loss_avg = orth_loss_sum / num_batches
+            epoch_stats["Avg Orthogonality Loss"] = round(orth_loss_avg, 4)
+            logger.info(f"  Avg Orthogonality Loss: {orth_loss_avg:.4f}")
 
-        optim_path = os.path.join(args.save, f"optim_{epoch+1}.pt")
-        torch.save(optimizer.state_dict(), optim_path)
+        if args.distil_coef:
+            dist_loss_avg = dist_loss_sum / num_batches
+            epoch_stats["Avg Distillation Loss"] = round(dist_loss_avg, 4)
+            logger.info(f"  Avg Distillation Loss: {dist_loss_avg:.4f}")
 
-    evaluate(model, args, classification_head_new, epoch_stats, logger)
+        # Log final learning rate for the epoch
+        final_lr = optimizer.param_groups[0]['lr']
+        epoch_stats["Final LR"] = final_lr
+        logger.info(f"  Final Learning Rate: {final_lr:.6f}")
 
-    logger.info(f"Avg ID carot Loss : {id_carot_loss_avg:.4f}")
-    epoch_stats["Avg ID carot Loss"] = round(id_carot_loss_avg, 4)
-    stats.append(epoch_stats)
-    stats_df = pd.DataFrame(stats)
-    log_dir = (
-        "expt_logs/"
-        + args.exp_name
-        + "/"
-        + "_BS"
-        + str(args.batch_size)
-        + "_WD"
-        + str(args.wd)
-        + "_LR"
-        + str(args.lr)
-        + "_run"
-        + str(args.run)
-    )
-    os.makedirs(log_dir, exist_ok=True)
-    stats_df.to_csv(log_dir + "/stats.tsv", sep="\t")
+        # Evaluate
+        args.current_epoch = epoch
+        classification_head_new = get_zeroshot_classifier(args, model.module.model)
+        classification_head_new = classification_head_new.cuda()
 
-    #! wandb logging
-    wandb.log({k: v for k, v in epoch_stats.items()})
+        # Saving model
+        if args.save is not None:
+            os.makedirs(args.save, exist_ok=True)
+            model_path = os.path.join(args.save, f"checkpoint_{epoch+1}.pt")
+            logger.info("Saving model to" + str(model_path))
+            model.module.save(model_path)
+
+            #! save the EMA teacher
+            if args.distil_coef:
+                ema_model_path = os.path.join(args.save, f"checkpoint_{epoch+1}_EMA.pt")
+                logger.info("Saving model to" + str(ema_model_path))
+                try:
+                    teacher_enc.save(ema_model_path)
+                except:
+                    print("============================")
+                    print("error occurred during EMA model saving")
+                    print("============================")
+
+            optim_path = os.path.join(args.save, f"optim_{epoch+1}.pt")
+            torch.save(optimizer.state_dict(), optim_path)
+
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32), torch.no_grad():
+            evaluate(model, args, classification_head_new, epoch_stats, logger)
+        
+        stats.append(epoch_stats)
+        stats_df = pd.DataFrame(stats)
+        
+        # Define model flag for more descriptive log directory
+        mod_flag = args.model.split('/')[-1] if '/' in args.model else args.model
+        
+        log_dir = (
+            "expt_logs/"
+            + args.exp_name
+            + "/"
+            + f"{mod_flag}_ep{args.epochs}"
+            + f"_BS{args.batch_size}"
+            + f"_WD{args.wd}"
+            + f"_LR{args.lr}"
+            + f"_D{args.distil_coef}"
+            + f"_OC{args.l_orth_wv}"
+            + f"_CF{args.cross_fnorm}"
+            + f"_run{args.run}"
+        )
+        os.makedirs(log_dir, exist_ok=True)
+        stats_df.to_csv(log_dir + "/stats.tsv", sep="\t")
+
+        #! wandb logging
+        wandb.log({k: v for k, v in epoch_stats.items()})
 
     if args.save is not None:
         return model_path

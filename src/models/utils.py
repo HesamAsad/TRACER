@@ -3,7 +3,7 @@ import os
 import torch
 import pickle
 from tqdm import tqdm
-import math
+import copy
 
 import numpy as np
 
@@ -53,6 +53,7 @@ def accuracy(output, target, topk=(1, )):
 
 
 def torch_save(classifier, save_path):
+    classifier = copy.deepcopy(classifier)
     if os.path.dirname(save_path) != '':
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
     with open(save_path, 'wb') as f:

@@ -189,9 +189,14 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
         print("\nEpoch : ", epoch)
         epoch_stats = {}
         epoch_stats["epoch"] = epoch
+        # Initialize tracking variables for epoch statistics
         id_carot_loss_sum = 0
         ldreg_loss_sum = 0
         mean_lid_sum = 0
+        fnorm_loss_sum = 0
+        orth_loss_sum = 0
+        dist_loss_sum = 0
+        clip_loss_sum = 0
         model.train()
         model = model.cuda()
         classification_head.train()
@@ -231,7 +236,10 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                         cov_vl = model.module.model.visual.attnpool.c_proj.weight.T @ model.module.model.text_projection.T
                     else:
                         cov_vl = model.module.model.visual.proj @ model.module.model.text_projection.T
-                    ft_clip_loss += args.cross_fnorm * torch.linalg.norm(cov_vl, ord='fro')
+                    fnorm_val = torch.linalg.norm(cov_vl, ord='fro')
+                    ft_clip_loss += args.cross_fnorm * fnorm_val
+                    fnorm_val = fnorm_val.item()
+                    fnorm_loss_sum += args.cross_fnorm * fnorm_val
 
                 #* orthogonality constraint
                 if args.l_orth_wv:
@@ -239,10 +247,14 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                         covv = model.module.model.visual.attnpool.c_proj.weight.T @ model.module.model.visual.attnpool.c_proj
                     else:
                         covv = model.module.model.visual.proj.T @ model.module.model.visual.proj
-                    ft_clip_loss += args.l_orth_wv * ((covv - torch.eye(covv.shape[0], device=covv.device))**2).sum()**(1/2)
+                    orth_val = ((covv - torch.eye(covv.shape[0], device=covv.device))**2).sum()**(1/2)
+                    ft_clip_loss += args.l_orth_wv * orth_val
+                    orth_val = orth_val.item()
+                    orth_loss_sum += args.l_orth_wv * orth_val
 
                 #! LDReg regularization
                 ldreg_loss, mean_lid = 0.0, 0.0
+                ldreg_loss_val = 0.0
                 if args.ldreg_coef > 0:
                     # Compute LID regularization on image features
                     ldreg_loss, mean_lid = compute_ldreg_loss(
@@ -250,8 +262,9 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                         k=args.ldreg_k, 
                         reg_type=args.ldreg_type
                     )
+                    ldreg_loss_val = ldreg_loss.item()
                     ft_clip_loss += args.ldreg_coef * ldreg_loss
-                    ldreg_loss_sum += ldreg_loss.item()
+                    ldreg_loss_sum += args.ldreg_coef * ldreg_loss_val
                     mean_lid_sum += mean_lid
 
             #! self-distillation flag
@@ -286,6 +299,8 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                         ).mean()
                         
                         ft_clip_loss += args.distil_coef * dist_loss
+                        if isinstance(dist_loss, torch.Tensor):
+                            dist_loss_sum += args.distil_coef * dist_loss.item()
 
             if fp16_scaler is None:
                 ft_clip_loss.backward()
@@ -318,34 +333,124 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                                 (1 - m) * param_q.detach().data
                             )
 
+            # Track base CLIP loss
+            base_clip_loss = ft_clip_loss.item()
+            if args.cross_fnorm:
+                base_clip_loss -= args.cross_fnorm * fnorm_val
+            if args.l_orth_wv:
+                base_clip_loss -= args.l_orth_wv * orth_val
+            if args.ldreg_coef > 0:
+                base_clip_loss -= args.ldreg_coef * ldreg_loss_val
+            if args.distil_coef and isinstance(dist_loss, torch.Tensor):
+                base_clip_loss -= args.distil_coef * dist_loss.item()
+            clip_loss_sum += base_clip_loss
+
             id_carot_loss_sum += ft_clip_loss.item()
 
             if i % print_every == 0:
                 percent_complete = 100 * i / num_batches
-                log_msg = (
-                    f"Train Epoch: {epoch} [{percent_complete:.0f}% {i}/{num_batches}]\t"
-                    f"ID Loss: {ft_clip_loss.item():.4f}"
-                )
-                if args.ldreg_coef > 0:
-                    log_msg += f"\tLDReg Loss: {ldreg_loss:.4f}\tMean LID: {mean_lid:.2f}"
-                logger.info(log_msg)
                 
+                # Prepare detailed log message
+                log_msg = (
+                    f"Train Epoch: {epoch} [{percent_complete:.0f}% {i}/{num_batches}]\n"
+                    f"\tTotal Loss: {ft_clip_loss.item():.4f}\n"
+                    f"\tCLIP Loss: {base_clip_loss:.4f}"
+                )
+                
+                # Prepare wandb log dict
                 wandb_log = {
                     "Train Epoch": epoch,
                     "Percent Complete": percent_complete,
-                    "ID Loss": ft_clip_loss.item(),
+                    "Total Loss": ft_clip_loss.item(),
+                    "CLIP Loss": base_clip_loss,
                 }
-                if args.ldreg_coef > 0:
+                
+                # Add cross_fnorm loss if applicable
+                if args.cross_fnorm:
+                    log_msg += f"\n\tCross F-norm Loss: {args.cross_fnorm * fnorm_val:.4f} (F-norm: {fnorm_val:.4f})"
                     wandb_log.update({
-                        "LDReg Loss": ldreg_loss,
+                        "Cross F-norm Loss": args.cross_fnorm * fnorm_val,
+                        "F-norm Value": fnorm_val,
+                    })
+                
+                # Add orthogonality loss if applicable
+                if args.l_orth_wv:
+                    log_msg += f"\n\tOrthogonality Loss: {args.l_orth_wv * orth_val:.4f} (Orth: {orth_val:.4f})"
+                    wandb_log.update({
+                        "Orthogonality Loss": args.l_orth_wv * orth_val,
+                        "Orthogonality Value": orth_val,
+                    })
+                
+                # Add LDReg loss if applicable
+                if args.ldreg_coef > 0:
+                    log_msg += f"\n\tLDReg Loss: {args.ldreg_coef * ldreg_loss_val:.4f} (Raw: {ldreg_loss_val:.4f})"
+                    log_msg += f"\n\tMean LID: {mean_lid:.2f}"
+                    wandb_log.update({
+                        "LDReg Loss": args.ldreg_coef * ldreg_loss_val,
+                        "LDReg Raw Loss": ldreg_loss_val,
                         "Mean LID": mean_lid,
                     })
+                
+                # Add distillation loss if applicable
+                if args.distil_coef and isinstance(dist_loss, torch.Tensor):
+                    log_msg += f"\n\tDistillation Loss: {args.distil_coef * dist_loss.item():.4f} (Raw: {dist_loss.item():.4f})"
+                    log_msg += f"\n\tEMA momentum: {m:.4f}"
+                    wandb_log.update({
+                        "Distillation Loss": args.distil_coef * dist_loss.item(),
+                        "Distillation Raw Loss": dist_loss.item(),
+                        "EMA Momentum": m,
+                    })
+                
+                # Add learning rate
+                current_lr = optimizer.param_groups[0]['lr']
+                log_msg += f"\n\tLearning Rate: {current_lr:.6f}"
+                wandb_log.update({"Learning Rate": current_lr})
+                
+                # Add logit scale
+                log_msg += f"\n\tLogit Scale: {lscale.exp().item():.4f}"
+                wandb_log.update({"Logit Scale": lscale.exp().item()})
+                
+                logger.info(log_msg)
                 wandb.log(wandb_log)
 
+        # Compute averages
         id_carot_loss_avg = id_carot_loss_sum / num_batches
+        clip_loss_avg = clip_loss_sum / num_batches
+
+        epoch_stats["Avg Total Loss"] = round(id_carot_loss_avg, 4)
+        epoch_stats["Avg CLIP Loss"] = round(clip_loss_avg, 4)
+
+        logger.info(f"Epoch {epoch} Summary:")
+        logger.info(f"  Avg Total Loss: {id_carot_loss_avg:.4f}")
+        logger.info(f"  Avg CLIP Loss: {clip_loss_avg:.4f}")
+
+        if args.cross_fnorm:
+            fnorm_loss_avg = fnorm_loss_sum / num_batches
+            epoch_stats["Avg Cross F-norm Loss"] = round(fnorm_loss_avg, 4)
+            logger.info(f"  Avg Cross F-norm Loss: {fnorm_loss_avg:.4f}")
+
+        if args.l_orth_wv:
+            orth_loss_avg = orth_loss_sum / num_batches
+            epoch_stats["Avg Orthogonality Loss"] = round(orth_loss_avg, 4)
+            logger.info(f"  Avg Orthogonality Loss: {orth_loss_avg:.4f}")
+
         if args.ldreg_coef > 0:
             ldreg_loss_avg = ldreg_loss_sum / num_batches
             mean_lid_avg = mean_lid_sum / num_batches
+            epoch_stats["Avg LDReg Loss"] = round(ldreg_loss_avg, 4)
+            epoch_stats["Avg Mean LID"] = round(mean_lid_avg, 2)
+            logger.info(f"  Avg LDReg Loss: {ldreg_loss_avg:.4f}")
+            logger.info(f"  Avg Mean LID: {mean_lid_avg:.2f}")
+
+        if args.distil_coef:
+            dist_loss_avg = dist_loss_sum / num_batches
+            epoch_stats["Avg Distillation Loss"] = round(dist_loss_avg, 4)
+            logger.info(f"  Avg Distillation Loss: {dist_loss_avg:.4f}")
+
+        # Log final learning rate for the epoch
+        final_lr = optimizer.param_groups[0]['lr']
+        epoch_stats["Final LR"] = final_lr
+        logger.info(f"  Final Learning Rate: {final_lr:.6f}")
 
         # Evaluate
         args.current_epoch = epoch
@@ -373,33 +478,29 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
             optim_path = os.path.join(args.save, f"optim_{epoch+1}.pt")
             torch.save(optimizer.state_dict(), optim_path)
 
-        evaluate(model, args, classification_head_new, epoch_stats, logger)
-
-        logger.info(f"Avg ID CaRot Loss : {id_carot_loss_avg:.4f}")
-        epoch_stats["Avg ID CaRot Loss"] = round(id_carot_loss_avg, 4)
-        
-        if args.ldreg_coef > 0:
-            logger.info(f"Avg LDReg Loss : {ldreg_loss_avg:.4f}")
-            logger.info(f"Avg Mean LID : {mean_lid_avg:.2f}")
-            epoch_stats["Avg LDReg Loss"] = round(ldreg_loss_avg, 4)
-            epoch_stats["Avg Mean LID"] = round(mean_lid_avg, 2)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32), torch.no_grad():
+            evaluate(model, args, classification_head_new, epoch_stats, logger)
         
         stats.append(epoch_stats)
         stats_df = pd.DataFrame(stats)
+        
+        # Define model flag for more descriptive log directory
+        mod_flag = args.model.split('/')[-1] if '/' in args.model else args.model
+        
         log_dir = (
             "expt_logs/"
             + args.exp_name
             + "/"
-            + "_BS"
-            + str(args.batch_size)
-            + "_WD"
-            + str(args.wd)
-            + "_LR"
-            + str(args.lr)
-            + "_LDReg"
-            + str(args.ldreg_coef)
-            + "_run"
-            + str(args.run)
+            + f"{mod_flag}_ep{args.epochs}"
+            + f"_BS{args.batch_size}"
+            + f"_WD{args.wd}"
+            + f"_LR{args.lr}"
+            + f"_D{args.distil_coef}"
+            + f"_OC{args.l_orth_wv}"
+            + f"_CF{args.cross_fnorm}"
+            + f"_LDReg{args.ldreg_coef}"
+            + f"_k{args.ldreg_k}"
+            + f"_run{args.run}"
         )
         os.makedirs(log_dir, exist_ok=True)
         stats_df.to_csv(log_dir + "/stats.tsv", sep="\t")

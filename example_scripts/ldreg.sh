@@ -1,5 +1,6 @@
 #!/bin/bash
 
+cd /data/projects/punim1316/CaRot
 echo "working directory: $PWD"
 export PYTHONPATH="$PYTHONPATH:$PWD"
 
