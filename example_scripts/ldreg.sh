@@ -1,6 +1,7 @@
 #!/bin/bash
 
-cd ..
+echo "working directory: $PWD"
+export PYTHONPATH="$PYTHONPATH:$PWD"
 
 lr=1e-5
 wd=0.1
