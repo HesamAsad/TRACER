@@ -214,7 +214,7 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
             ft_image, ft_text = ft_batch
             ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
             
-            with torch.amp.autocast('cuda', fp16_scaler is not None):
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32):
                 ft_image_features, ft_text_features, logit_scale2 = model(
                     ft_image, ft_text
                 )
@@ -258,7 +258,7 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
             dist_loss, m = torch.tensor(0), 0.0
             if args.distil_coef:
                 if step > 0:
-                    with torch.amp.autocast('cuda', fp16_scaler is not None):
+                    with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32):
                         with torch.no_grad():
                             (
                                 ft_image_features_t,
