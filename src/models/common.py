@@ -152,6 +152,9 @@ def get_dataloader(dataset, is_train, args, image_encoder=None):
                                          args.device, args.cache_dir)
         dataloader = DataLoader(feature_dataset,
                                 batch_size=args.batch_size,
+                                pin_memory=True,
+                                persistent_workers=True,
+                                prefetch_factor=4,
                                 shuffle=is_train)
     else:
         dataloader = dataset.train_loader if is_train else dataset.test_loader

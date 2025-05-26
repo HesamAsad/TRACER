@@ -101,7 +101,7 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
     preprocess_fn = clip_encoder.train_preprocess
     image_enc = None
     clip_encoder.process_images = True
-    print_every = 100
+    print_every = 5
 
     dataset_class = getattr(datasets, args.train_dataset)
     print(f"Training dataset {args.train_dataset}")
@@ -186,7 +186,7 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
         exit()
 
     for epoch in tqdm(range(0, args.epochs), desc="Epochs"):
-        print("Epoch : ", epoch)
+        print("\nEpoch : ", epoch)
         epoch_stats = {}
         epoch_stats["epoch"] = epoch
         id_carot_loss_sum = 0

@@ -182,6 +182,9 @@ def get_imagenet(args, preprocess_fns, split):
         dataset,
         batch_size=args.batch_size,
         num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,
         sampler=sampler,
     )
 
@@ -483,6 +486,8 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0):
         shuffle=shuffle,
         num_workers=args.workers,
         pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,
         sampler=sampler,
         drop_last=False,
     )

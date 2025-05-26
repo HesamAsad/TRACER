@@ -79,6 +79,9 @@ class ImageNet:
             sampler=sampler,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=4,
             **kwargs,
         )
 
@@ -89,6 +92,9 @@ class ImageNet:
                 self.train_dataset_custom,
                 batch_size=1,
                 shuffle=True,
+                pin_memory=True,
+                persistent_workers=True,
+                prefetch_factor=4,
                 num_workers=self.num_workers)
 
     def populate_test(self):
@@ -97,6 +103,9 @@ class ImageNet:
             self.test_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=4,
             sampler=self.get_test_sampler())
 
     def get_test_path(self):
