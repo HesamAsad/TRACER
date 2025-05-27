@@ -4,8 +4,45 @@ import torch
 import pickle
 from tqdm import tqdm
 import copy
-
+import glob
 import numpy as np
+
+
+def find_latest_checkpoint(checkpoint_dir):
+    """Find the latest checkpoint in the given directory."""
+    if not os.path.exists(checkpoint_dir):
+        return None, None, None, 0
+    
+    # Find all checkpoint files
+    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "checkpoint_*.pt"))
+    if not checkpoint_files:
+        return None, None, None, 0
+    
+    # Extract epoch numbers and find the latest
+    epochs = []
+    for f in checkpoint_files:
+        try:
+            epoch_num = int(f.split("checkpoint_")[1].split(".pt")[0])
+            epochs.append(epoch_num)
+        except:
+            continue
+    
+    if not epochs:
+        return None, None, None, 0
+    
+    latest_epoch = max(epochs)
+    
+    # Construct paths for model, EMA, and optimizer
+    model_path = os.path.join(checkpoint_dir, f"checkpoint_{latest_epoch}.pt")
+    ema_path = os.path.join(checkpoint_dir, f"checkpoint_{latest_epoch}_EMA.pt")
+    optim_path = os.path.join(checkpoint_dir, f"optim_{latest_epoch}.pt")
+    
+    # Check if files exist
+    model_path = model_path if os.path.exists(model_path) else None
+    ema_path = ema_path if os.path.exists(ema_path) else None
+    optim_path = optim_path if os.path.exists(optim_path) else None
+    
+    return model_path, ema_path, optim_path, latest_epoch
 
 
 def assign_learning_rate(param_group, new_lr):
