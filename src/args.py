@@ -345,6 +345,13 @@ def parse_arguments():
         help="type of LID regularization (l1 or l2)",
     )
 
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint directory to resume training from",
+    )
+
     parsed_args = parser.parse_args()
 
     parsed_args.device = "cuda" if torch.cuda.is_available() else "cpu"
