@@ -10,9 +10,9 @@ bs=512
 ts=0.0
 method=carot_ldreg
 fp16=1
-OC=0.2
+OC=0.0
 SD=1.5
-LDREG_COEF=0.1
+LDREG_COEF=0.2
 LDREG_K=64
 LDREG_TYPE="l1"
 

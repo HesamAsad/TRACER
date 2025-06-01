@@ -23,7 +23,7 @@ python src/main.py \
 --data-location=./datasets/data/ --ft_data="./datasets/csv/imagenet.csv" \
 --csv-img-key filepath --csv-caption-key title --exp_name ImageNet/${method} --cross_fnorm=0.05 \
 --distil_coef $sd --l_orth_wv $oc \
---wb_project "clip_finetune" --method $method --use_fp16 ${fp16}
+--wb_project "clip_finetune" --method $method --use_fp16 ${fp16} --run 2
 
 done
 done

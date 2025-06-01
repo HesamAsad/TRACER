@@ -17,6 +17,8 @@ import random
 import wandb
 import glob
 
+torch.set_float32_matmul_precision('medium')
+
 
 def set_seed(SEED):
     torch.manual_seed(SEED)
