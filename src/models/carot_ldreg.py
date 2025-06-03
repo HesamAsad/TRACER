@@ -216,8 +216,20 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                 )  # If ft_iterator is all used, re-initialize it
                 ft_batch = next(ft_iterator)
             
-            ft_image, ft_text = ft_batch
-            ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
+            # Try to unpack labels if available
+            ft_labels = None
+            use_supcon = False
+            if len(ft_batch) == 3:
+                ft_image, ft_text, ft_labels = ft_batch
+                ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
+                ft_labels = ft_labels.cuda()
+                use_supcon = True
+                if not supcon_logged_this_epoch:
+                    logger.info(f"Using supervised CLIP loss with labels for epoch {epoch}")
+                    supcon_logged_this_epoch = True
+            else:
+                ft_image, ft_text = ft_batch
+                ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32):
                 ft_image_features, ft_text_features, logit_scale2 = model(

@@ -1,17 +1,9 @@
-import requests
 import os
-import multiprocessing as mp
-from io import BytesIO
-import numpy as np
-import PIL
-from PIL import Image
-import pickle
-import sys
 import src.templates as templates
 
 template = getattr(templates, 'openai_imagenet_template')
-out = open(f"./datasets/csv/imagenet.csv", "w")
-out.write("title\tfilepath\n")
+out = open(f"./datasets/csv/imagenet_withLabels.csv", "w")
+out.write("title\tfilepath\tlabel_idx\tlabel_name\n")
 
 openai_classnames = [
     "tench", "goldfish", "great white shark", "tiger shark",
@@ -247,5 +239,5 @@ for i in range(1000):
         fp = os.path.join(curr_path, file)
         for t in template:
             caption = t(class_name)
-            out.write("%s\t%s\n" % (caption, fp))
+            out.write("%s\t%s\t%d\t%s\n" % (caption, fp, i, class_name))
 out.close()

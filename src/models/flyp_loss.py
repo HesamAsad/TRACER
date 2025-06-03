@@ -109,6 +109,7 @@ def flyp_loss(args, clip_encoder, classification_head, logger):
         epoch_stats["epoch"] = epoch
         id_flyp_loss_sum = 0
         clip_loss_sum = 0
+        supcon_logged_this_epoch = False
         model.train()
         model = model.cuda()
         classification_head.train()
@@ -126,8 +127,20 @@ def flyp_loss(args, clip_encoder, classification_head, logger):
                 ft_iterator = iter(ft_dataloader)
                 ft_batch = next(ft_iterator)
 
-            ft_image, ft_text = ft_batch
-            ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
+            # Try to unpack labels if available
+            ft_labels = None
+            use_supcon = False
+            if len(ft_batch) == 3:
+                ft_image, ft_text, ft_labels = ft_batch
+                ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
+                ft_labels = ft_labels.cuda()
+                use_supcon = True
+                if not supcon_logged_this_epoch:
+                    logger.info(f"Using supervised CLIP loss with labels for epoch {epoch}")
+                    supcon_logged_this_epoch = True
+            else:
+                ft_image, ft_text = ft_batch
+                ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
 
             with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32):
                 ft_image_features, ft_text_features, logit_scale2 = model(
@@ -136,8 +149,10 @@ def flyp_loss(args, clip_encoder, classification_head, logger):
                 
                 lscale = logit_scale2 if len(devices) == 1 else logit_scale2[0]
                 
-                ft_clip_loss = clip_loss_fn(
-                    ft_image_features, ft_text_features, lscale
+                # Use ClipLoss with ground_labels for supervised contrastive learning
+                ft_clip_loss, logits_per_image, logits_per_text = clip_loss_fn(
+                    ft_image_features, ft_text_features, lscale,
+                    ground_labels=ft_labels, google_sup_loss=use_supcon
                 )
 
             if fp16_scaler is None:
@@ -157,16 +172,18 @@ def flyp_loss(args, clip_encoder, classification_head, logger):
                 percent_complete = 100 * i / num_batches
                 
                 # Prepare detailed log message
+                loss_type = "Supervised CLIP" if use_supcon else "FLYP"
                 log_msg = (
                     f"Train Epoch: {epoch} [{percent_complete:.0f}% {i}/{num_batches}]\n"
-                    f"\tFLYP Loss: {clip_loss_item:.4f}"
+                    f"\t{loss_type} Loss: {clip_loss_item:.4f}"
                 )
                 
                 # Prepare wandb log dict
                 wandb_log = {
                     "Train Epoch": epoch,
                     "Percent Complete": percent_complete,
-                    "FLYP Loss": clip_loss_item,
+                    f"{loss_type} Loss": clip_loss_item,
+                    "Using Supervised": use_supcon,
                 }
                 
                 # Add learning rate

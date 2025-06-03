@@ -226,7 +226,13 @@ def parse_arguments():
                         default=False,
                         action="store_true",
                         help="get labels from csv.")
-
+    
+    parser.add_argument(
+        "--supervised_label_key",
+        type=str,
+        default="label_idx",
+        help="label key in csv.",
+    )
 
     parser.add_argument(
         "--min_lr",
@@ -350,6 +356,13 @@ def parse_arguments():
         type=str,
         default=None,
         help="Path to checkpoint directory to resume training from",
+    )
+
+    parser.add_argument(
+        "--supcon_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature parameter for SupCon loss when labels are available",
     )
 
     parsed_args = parser.parse_args()

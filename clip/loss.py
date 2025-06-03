@@ -118,11 +118,9 @@ class ClipLoss(nn.Module):
                 logits_per_image = logit_scale * all_image_features @ all_text_features.T
                 logits_per_text = logits_per_image.T
         else:
-            # import pdb;pdb.set_trace()
             logits_per_image = logit_scale * image_features @ text_features.T
             logits_per_text = logit_scale * text_features @ image_features.T
 
-        # calculated ground-truth and cache if enabled
         num_logits = logits_per_image.shape[0]
 
         if ground_labels is not None:
@@ -130,9 +128,6 @@ class ClipLoss(nn.Module):
                 image_features.shape[0], 1)
             equal_labels = (ground_labels_repeated == ground_labels.view(
                 -1, 1)).type(torch.float)
-            # equal_labels = torch.eye(equal_labels.shape[0],
-            #                          device=device,
-            #                          dtype=torch.float)
 
             if ignore:
                 I = torch.eye(equal_labels.shape[0],
@@ -163,30 +158,27 @@ class ClipLoss(nn.Module):
 
                 total_loss /= 2
             elif google_sup_loss:
-                image_logit_exp = torch.exp(
-                    logits_per_image -
-                    torch.max(logits_per_image, dim=1, keepdim=True).values)
+                # Compute image_logit_exp
+                logits_per_image_max = torch.max(logits_per_image, dim=1, keepdim=True).values
+                image_logit_exp = torch.exp(logits_per_image - logits_per_image_max)
                 image_sum = torch.sum(image_logit_exp, dim=1, keepdim=True)
-                image_sum = image_sum.repeat(1, image_logit_exp.shape[1])
                 image_sum_sub = image_sum - image_logit_exp
-                image_logit_exp /= image_sum_sub
-                image_logit_exp = -torch.log(image_logit_exp)
-                image_logit_exp *= equal_labels
-                loss1 = torch.sum(image_logit_exp, dim=1) / torch.sum(
-                    equal_labels, dim=1)
+                eps = 1e-8
+                image_logit_exp_div = image_logit_exp / (image_sum_sub + eps)
+                image_logit_exp_log = -torch.log(image_logit_exp_div + eps)
+                image_logit_exp_masked = image_logit_exp_log * equal_labels
+                loss1 = torch.sum(image_logit_exp_masked, dim=1) / (torch.sum(equal_labels, dim=1) + eps)
                 loss1 = torch.mean(loss1)
 
-                text_logit_exp = torch.exp(
-                    logits_per_text -
-                    torch.max(logits_per_text, dim=1, keepdim=True).values)
+                # Compute text_logit_exp
+                logits_per_text_max = torch.max(logits_per_text, dim=1, keepdim=True).values
+                text_logit_exp = torch.exp(logits_per_text - logits_per_text_max)
                 text_sum = torch.sum(text_logit_exp, dim=1, keepdim=True)
-                text_sum = text_sum.repeat(1, text_logit_exp.shape[1])
                 text_sum_sub = text_sum - text_logit_exp
-                text_logit_exp /= text_sum_sub
-                text_logit_exp = -torch.log(text_logit_exp)
-                text_logit_exp *= equal_labels
-                loss2 = torch.sum(text_logit_exp, dim=1) / torch.sum(
-                    equal_labels, dim=1)
+                text_logit_exp_div = text_logit_exp / (text_sum_sub + eps)
+                text_logit_exp_log = -torch.log(text_logit_exp_div + eps)
+                text_logit_exp_masked = text_logit_exp_log * equal_labels
+                loss2 = torch.sum(text_logit_exp_masked, dim=1) / (torch.sum(equal_labels, dim=1) + eps)
                 loss2 = torch.mean(loss2)
 
                 total_loss = (loss1 + loss2) / 2
@@ -216,6 +208,6 @@ class ClipLoss(nn.Module):
             else:
                 total_loss = (F.cross_entropy(logits_per_image, labels) +
                                 F.cross_entropy(logits_per_text, labels)) / 2
-            
+
         #! output logits to reuse them in m2mix
         return total_loss, logits_per_image, logits_per_text

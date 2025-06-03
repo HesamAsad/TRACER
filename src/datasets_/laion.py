@@ -44,7 +44,10 @@ class CsvDataset(Dataset):
         self.images = df[img_key].tolist()
         self.captions = df[caption_key].tolist()
 
-        num_columns = len(df.columns) - 2
+        if label_key is not None:
+            num_columns = len(df.columns) - 4
+        else:
+            num_columns = len(df.columns) - 2
 
         self.captions_list = []
         for k in range(1, num_columns):
