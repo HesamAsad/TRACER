@@ -20,7 +20,7 @@ class CLIPEncoder(torch.nn.Module):
         else:
             self.model, self.train_preprocess, self.val_preprocess = clip.load(
                 args.model, args.device, jit=False)
-        self.cache_dir = args.cache_dir
+        # self.cache_dir = args.cache_dir
         self.device = args.device
 
     def forward(self, images, text=None):
@@ -146,7 +146,7 @@ class ImageEncoder(torch.nn.Module):
         self.model, self.train_preprocess, self.val_preprocess = clip.load(
             args.model, args.device, jit=False)
 
-        self.cache_dir = args.cache_dir
+        # self.cache_dir = args.cache_dir
 
         if not keep_lang and hasattr(self.model, 'transformer'):
             delattr(self.model, 'transformer')

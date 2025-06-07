@@ -284,6 +284,14 @@ def parse_arguments():
         default=0.2,
         help="EMA teacher evolving schedule (warmup ratio)",
     )
+    
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.5,
+        help="Beta parameter for Beta distribution-based moving average (both alpha and beta of Beta distribution)",
+    )
+    
     parser.add_argument(
         "--cross_fnorm",
         type=float,
@@ -363,6 +371,14 @@ def parse_arguments():
         type=float,
         default=0.07,
         help="Temperature parameter for SupCon loss when labels are available",
+    )
+
+    # Gradient clipping parameters
+    parser.add_argument(
+        "--max_grad_norm",
+        type=float,
+        default=0.001,
+        help="Maximum gradient norm for gradient clipping (0.0 to disable)",
     )
 
     parsed_args = parser.parse_args()

@@ -19,6 +19,7 @@ from src.models.modeling import ClassificationHead, CLIPEncoder, ImageClassifier
 from src.models.utils import cosine_lr, torch_load, LabelSmoothing, get_logits, clip_img_preprocessing, attack_pgd
 from src.models.zeroshot import get_zeroshot_classifier
 from src.datasets_.laion import get_data
+from src.models.beta_moving_average import GeneralMovingAverage, create_beta_weight_function
 import src.datasets_ as datasets
 
 
@@ -27,6 +28,10 @@ def carot_loss(args, clip_encoder, classification_head, logger):
 
     logger.info("Fine-tuning Using carot Loss")
     model = clip_encoder
+    # freeze text encoder of the clip
+    # for param in model.model.transformer.parameters():
+    #     param.requires_grad = False
+
     input_key = "images"
     preprocess_fn = clip_encoder.train_preprocess
     image_enc = None
@@ -57,9 +62,10 @@ def carot_loss(args, clip_encoder, classification_head, logger):
         model = model.load(args.clip_load)
 
     if args.distil_coef:
-        import copy
-
-        teacher_enc = copy.deepcopy(model).cuda()
+        # Create Beta distribution-based moving average teacher
+        total_iterations = args.epochs * num_batches
+        weight_func = create_beta_weight_function(args.beta, total_iterations)
+        teacher_enc = GeneralMovingAverage(model.cuda(), weight_func)
 
     model = model.cuda()
 
@@ -68,9 +74,6 @@ def carot_loss(args, clip_encoder, classification_head, logger):
     logger.info("Using devices" + str(devices))
 
     model = torch.nn.DataParallel(model, device_ids=devices)
-
-    if args.distil_coef:
-        teacher_enc.load_state_dict(model.module.state_dict())
 
     classification_head = torch.nn.DataParallel(classification_head, device_ids=devices)
     classification_head.train()
@@ -125,6 +128,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
         orth_loss_sum = 0
         dist_loss_sum = 0
         clip_loss_sum = 0
+        supcon_logged_this_epoch = False  # Track if we've logged supervised contrastive info this epoch
         model.train()
         model = model.cuda()
         classification_head.train()
@@ -144,8 +148,20 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                 )  # If ft_iterator is all used, re-initialize it
                 ft_batch = next(ft_iterator)
             
-            ft_image, ft_text = ft_batch
-            ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
+            # Try to unpack labels if available
+            ft_labels = None
+            use_supcon = False
+            if len(ft_batch) == 3:
+                ft_image, ft_text, ft_labels = ft_batch
+                ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
+                ft_labels = ft_labels.cuda()
+                use_supcon = True
+                if not supcon_logged_this_epoch:
+                    logger.info(f"Using supervised CLIP loss with labels for epoch {epoch}")
+                    supcon_logged_this_epoch = True
+            else:
+                ft_image, ft_text = ft_batch
+                ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32):
                 ft_image_features, ft_text_features, logit_scale2 = model(
@@ -181,16 +197,17 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                     orth_loss_sum += args.l_orth_wv * orth_val
 
             #! self-distillation flag
-            dist_loss, m = torch.tensor(0), 0.0
+            dist_loss, current_weight = torch.tensor(0), 0.0
             if args.distil_coef:
                 if step > 0:
                     with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32):
                         with torch.no_grad():
+                            # Use the Beta moving average teacher for inference
                             (
                                 ft_image_features_t,
                                 ft_text_features_t,
                                 logit_scale_t,
-                            ) = teacher_enc(ft_image, ft_text)
+                            ) = teacher_enc.moving_avg(ft_image, ft_text)
 
                             logits_per_image_t = (
                                 logit_scale_t
@@ -214,37 +231,37 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                         ft_clip_loss += args.distil_coef * dist_loss
                         if isinstance(dist_loss, torch.Tensor):
                             dist_loss_sum += args.distil_coef * dist_loss.item()
+                        
+                        # Get current weight for logging
+                        current_weight = teacher_enc.weight
 
             if fp16_scaler is None:
                 ft_clip_loss.backward()
+                # Apply gradient clipping if specified
+                grad_norm = None
+                if args.max_grad_norm > 0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
+                    
                 optimizer.step()
             else:
                 fp16_scaler.scale(ft_clip_loss).backward()
+                # Apply gradient clipping if specified
+                grad_norm = None
+                if args.max_grad_norm > 0:
+                    fp16_scaler.unscale_(optimizer)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
                 fp16_scaler.step(optimizer)
                 fp16_scaler.update()
 
             #! self-distillation
             if args.distil_coef:
                 if args.ema_up_freq <= 0:
-                    pass
+                    # Update teacher every step
+                    teacher_enc.update()
                 else:
-                    if ((step % args.ema_up_freq) == 0) or (
-                        step == num_batches * args.epochs
-                    ):
-                        if step < num_batches * args.epochs * args.m_warm_up:
-                            m = (
-                                (args.m_sche_tar - args.m_sche_src)
-                                / (num_batches * args.epochs * args.m_warm_up)
-                            ) * step + args.m_sche_src
-                        else:
-                            m = args.m_sche_tar
-                        
-                        for param_q, param_k in zip(
-                            model.module.parameters(), teacher_enc.parameters()
-                        ):
-                            param_k.data.mul_(m).add_(
-                                (1 - m) * param_q.detach().data
-                            )
+                    # Update teacher at specified frequency
+                    if ((step % args.ema_up_freq) == 0) or (step == num_batches * args.epochs - 1):
+                        teacher_enc.update()
 
             # Track base CLIP loss
             base_clip_loss = ft_clip_loss.item()
@@ -276,6 +293,14 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                     "CLIP Loss": base_clip_loss,
                 }
                 
+                # Add gradient norm if clipping is enabled
+                if args.max_grad_norm > 0 and grad_norm is not None:
+                    log_msg += f"\n\tGradient Norm: {grad_norm:.4f} (max: {args.max_grad_norm})"
+                    wandb_log.update({
+                        "Gradient Norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                        "Max Grad Norm": args.max_grad_norm,
+                    })
+                
                 # Add cross_fnorm loss if applicable
                 if args.cross_fnorm:
                     log_msg += f"\n\tCross F-norm Loss: {args.cross_fnorm * fnorm_val:.4f} (F-norm: {fnorm_val:.4f})"
@@ -294,12 +319,16 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                 
                 # Add distillation loss if applicable
                 if args.distil_coef and isinstance(dist_loss, torch.Tensor):
+                    # Calculate training progress for beta momentum display
+                    total_steps = num_batches * args.epochs
+                    progress = step / total_steps
                     log_msg += f"\n\tDistillation Loss: {args.distil_coef * dist_loss.item():.4f} (Raw: {dist_loss.item():.4f})"
-                    log_msg += f"\n\tEMA momentum: {m:.4f}"
+                    log_msg += f"\n\tBeta Momentum: {current_weight:.4f} (progress: {progress:.2%})"
                     wandb_log.update({
                         "Distillation Loss": args.distil_coef * dist_loss.item(),
                         "Distillation Raw Loss": dist_loss.item(),
-                        "EMA Momentum": m,
+                        "Beta Momentum": current_weight,
+                        "Training Progress": progress,
                     })
                 
                 # Add learning rate
@@ -399,6 +428,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
 
         #! wandb logging
         wandb.log({k: v for k, v in epoch_stats.items()})
+        # args.max_grad_norm = min(1, args.max_grad_norm * 10)
 
     if args.save is not None:
         return model_path

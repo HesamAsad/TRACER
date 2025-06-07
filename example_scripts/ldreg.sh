@@ -10,11 +10,11 @@ bs=512
 ts=0.0
 method=carot_ldreg
 fp16=1
-OC=0.0
+OC=0.4
 SD=1.5
-LDREG_COEF=0.2
+LDREG_COEF=0.5
 LDREG_K=64
-LDREG_TYPE="l1"
+LDREG_TYPE="l2"
 
 for sd in $SD
 do
