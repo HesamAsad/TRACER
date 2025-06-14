@@ -260,7 +260,7 @@ def parse_arguments():
     parser.add_argument(
         "--ema_up_freq",
         type=int,
-        default=500,
+        default=0,
         help="required iterations for EMA teacher update",
     )
 
@@ -377,8 +377,15 @@ def parse_arguments():
     parser.add_argument(
         "--max_grad_norm",
         type=float,
-        default=0.001,
+        default=0.0001,
         help="Maximum gradient norm for gradient clipping (0.0 to disable)",
+    )
+
+    parser.add_argument(
+        "--grad_norm_multiplier",
+        type=float,
+        default=100.0,
+        help="Multiplier for maximum gradient norm for gradient clipping",
     )
 
     parsed_args = parser.parse_args()

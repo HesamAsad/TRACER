@@ -71,6 +71,34 @@ def cosine_lr(optimizer, base_lrs, warmup_length, steps, min_lr=0.0):
     return _lr_adjuster
 
 
+def cosine_grad_norm_scheduler(initial_norm, final_norm, steps):
+    """
+    Cosine scheduler for gradient clipping norm - monotonically increasing.
+    
+    Args:
+        initial_norm: Starting gradient norm value (e.g., 0.0001)
+        final_norm: Final gradient norm value (e.g., 0.001) 
+        steps: Total number of training steps
+    
+    Returns:
+        Function that takes step and returns current grad norm value
+    """
+    def _grad_norm_adjuster(step):
+        # Ensure step doesn't exceed total steps
+        step = min(step, steps - 1)
+        
+        # Progress from 0 to 1
+        progress = step / (steps - 1) if steps > 1 else 0
+        
+        # Cosine-based smooth increase: starts slow, accelerates, then slows down
+        # This creates a smooth S-curve from initial_norm to final_norm
+        cosine_factor = 0.5 * (1 - np.cos(np.pi * progress))  # 0 to 1
+        
+        return initial_norm + (final_norm - initial_norm) * cosine_factor
+    
+    return _grad_norm_adjuster
+
+
 # def linear_schedule(base_value, final_value, cur_iter, tot_iter):
 #     '''
 #     - cur_iter : start from 0

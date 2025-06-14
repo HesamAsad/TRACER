@@ -16,7 +16,7 @@ from src.args import parse_arguments
 from src.datasets_.common import get_dataloader, maybe_dictionarize
 from src.models.eval import evaluate
 from src.models.modeling import ClassificationHead, CLIPEncoder, ImageClassifier
-from src.models.utils import cosine_lr, torch_load, LabelSmoothing, get_logits, clip_img_preprocessing, attack_pgd
+from src.models.utils import cosine_lr, cosine_grad_norm_scheduler, torch_load, LabelSmoothing, get_logits, clip_img_preprocessing, attack_pgd
 from src.models.zeroshot import get_zeroshot_classifier
 from src.datasets_.laion import get_data
 from src.models.beta_moving_average import GeneralMovingAverage, create_beta_weight_function
@@ -97,6 +97,13 @@ def carot_loss(args, clip_encoder, classification_head, logger):
     scheduler = cosine_lr(
         optimizer, args.lr, args.warmup_length, args.epochs * num_batches, args.min_lr
     )
+    
+    # Initialize gradient norm scheduler
+    initial_grad_norm = args.max_grad_norm  # Start from initial value (0.0001)
+    final_grad_norm = args.max_grad_norm * args.grad_norm_multiplier  # Target final value
+    grad_norm_scheduler = cosine_grad_norm_scheduler(
+        initial_grad_norm, final_grad_norm, args.epochs * num_batches
+    )
 
     stats = []
     prev_num_logits = 0
@@ -138,6 +145,10 @@ def carot_loss(args, clip_encoder, classification_head, logger):
             step = i + epoch * num_batches
             if epoch != -1:
                 scheduler(step)
+            
+            # Update gradient norm for this step
+            current_grad_norm = grad_norm_scheduler(step)
+            
             optimizer.zero_grad()
 
             try:
@@ -239,17 +250,17 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                 ft_clip_loss.backward()
                 # Apply gradient clipping if specified
                 grad_norm = None
-                if args.max_grad_norm > 0:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
+                if current_grad_norm > 0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params, current_grad_norm)
                     
                 optimizer.step()
             else:
                 fp16_scaler.scale(ft_clip_loss).backward()
                 # Apply gradient clipping if specified
                 grad_norm = None
-                if args.max_grad_norm > 0:
+                if current_grad_norm > 0:
                     fp16_scaler.unscale_(optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params, current_grad_norm)
                 fp16_scaler.step(optimizer)
                 fp16_scaler.update()
 
@@ -294,11 +305,13 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                 }
                 
                 # Add gradient norm if clipping is enabled
-                if args.max_grad_norm > 0 and grad_norm is not None:
-                    log_msg += f"\n\tGradient Norm: {grad_norm:.4f} (max: {args.max_grad_norm})"
+                if current_grad_norm > 0 and grad_norm is not None:
+                    log_msg += f"\n\tGradient Norm: {grad_norm:.4f} (scheduled max: {current_grad_norm:.6f})"
                     wandb_log.update({
                         "Gradient Norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                        "Max Grad Norm": args.max_grad_norm,
+                        "Scheduled Max Grad Norm": current_grad_norm,
+                        "Initial Max Grad Norm": initial_grad_norm,
+                        "Final Max Grad Norm": final_grad_norm,
                     })
                 
                 # Add cross_fnorm loss if applicable

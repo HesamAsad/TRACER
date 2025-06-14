@@ -6,6 +6,7 @@ from src.models.eval import evaluate
 from src.models.ft_loss import finetune
 from src.models.carot_loss import carot_loss
 from src.models.carot_ldreg import carot_ldreg_loss
+from src.models.flyp_ldreg import flyp_ldreg_loss
 from src.models.ce_ablation import ce_ablation
 from src.models.modeling import ClassificationHead, CLIPEncoder, ImageClassifier
 from src.models.utils import fisher_load
@@ -98,6 +99,9 @@ def main(args):
     elif args.method == 'carot_ldreg':
         finetuned_checkpoint = carot_ldreg_loss(args, clip_encoder,
                                                  classification_head, logger)
+    elif args.method == 'flyp_ldreg':
+        finetuned_checkpoint = flyp_ldreg_loss(args, clip_encoder,
+                                               classification_head, logger)
     else:
         finetuned_checkpoint = carot_loss(args, clip_encoder,
                                             classification_head, logger)
