@@ -1,0 +1,406 @@
+from asyncio.constants import LOG_THRESHOLD_FOR_CONNLOST_WRITES
+import os
+import copy
+import time
+from tqdm.auto import tqdm
+import wandb
+import pdb
+
+import torch
+from torch.nn import functional as F
+import pandas as pd
+import clip.clip as clip
+from clip.loss import ClipLoss
+
+from src.args import parse_arguments
+from src.datasets_.common import get_dataloader, maybe_dictionarize
+from src.models.eval import evaluate
+from src.models.modeling import ClassificationHead, CLIPEncoder, ImageClassifier
+from src.models.utils import cosine_lr, torch_load, LabelSmoothing, get_logits, clip_img_preprocessing, attack_pgd
+from src.models.zeroshot import get_zeroshot_classifier
+from src.datasets_.laion import get_data
+import src.datasets_ as datasets
+
+
+def lid_mom_est(data, reference, k, get_idx=False, 
+                compute_mode='use_mm_for_euclid_dist_if_necessary'):
+    """
+    Method of Moments estimation of Local Intrinsic Dimensionality (LID)
+    
+    Args:
+        data: representations that need LID to be estimated
+        reference: reference representations (usually the same batch)
+        k: locality parameter, the neighbourhood size
+        get_idx: whether to return indices of nearest neighbors
+        compute_mode: computation mode for cdist
+    
+    Returns:
+        lids: estimated LID values for each sample
+    """
+    b = data.shape[0]
+    k = min(k, b-2)
+    data = torch.flatten(data, start_dim=1)
+    reference = torch.flatten(reference, start_dim=1)
+    
+    # Compute pairwise distances
+    r = torch.cdist(data, reference, p=2, compute_mode=compute_mode)
+    
+    # Sort distances and get k nearest neighbors
+    a, idx = torch.sort(r, dim=1)
+    
+    # Compute mean distance to k nearest neighbors (excluding self)
+    m = torch.mean(a[:, 1:k+1], dim=1)
+    
+    # Estimate LID using method of moments
+    lids = m / (a[:, k+1] - m)
+    
+    # Handle potential numerical issues
+    lids = torch.clamp(lids, min=1e-8)
+    
+    if get_idx:
+        return idx, lids
+    return lids
+
+
+def compute_ldreg_loss(features, k=64, reg_type="l1"):
+    """
+    Compute LID regularization loss
+    
+    Args:
+        features: representation features
+        k: number of nearest neighbors
+        reg_type: type of regularization ("l1" or "l2")
+    
+    Returns:
+        ldreg_loss: LID regularization loss
+        mean_lid: mean LID value for logging
+    """
+    # Estimate LID for the batch
+    lids = lid_mom_est(data=features, reference=features.detach(), k=k)
+    
+    # Compute regularization loss based on type
+    if reg_type == "l1":
+        ldreg_loss = -torch.log(lids).mean()
+    elif reg_type == "l2":
+        ldreg_loss = -torch.sqrt(torch.square(torch.log(lids))).mean()
+    else:
+        raise ValueError(f"Unknown regularization type: {reg_type}")
+    
+    # Compute geometric mean of LID for logging
+    mean_lid = torch.exp(torch.log(lids).mean())
+    
+    return ldreg_loss, mean_lid.item()
+
+
+def flyp_ldreg_loss(args, clip_encoder, classification_head, logger):
+    assert args.train_dataset is not None, "Please provide a training dataset."
+    
+    logger.info("Fine-tuning Using FLYP Loss with LDReg")
+    model = clip_encoder
+    input_key = "images"
+    preprocess_fn = clip_encoder.train_preprocess
+    image_enc = None
+    clip_encoder.process_images = True
+    print_every = 5
+
+    dataset_class = getattr(datasets, args.train_dataset)
+    print(f"Training dataset {args.train_dataset}")
+
+    dataset = dataset_class(
+        preprocess_fn, location=args.data_location, batch_size=args.batch_size
+    )
+
+    img_text_data = get_data(
+        args, (clip_encoder.train_preprocess, clip_encoder.val_preprocess), epoch=0
+    )
+    assert len(img_text_data), "At least one train or eval dataset must be specified."
+    ft_dataloader = img_text_data["train_ft"].dataloader
+    ft_iterator = iter(ft_dataloader)
+    num_batches = len(dataset.train_loader)
+    print(f"Num batches is {num_batches}")
+
+    fp16_scaler = None
+    if args.use_fp16:
+        fp16_scaler = torch.amp.GradScaler('cuda')
+
+    if args.clip_load is not None:
+        model = model.load(args.clip_load)
+
+    model = model.cuda()
+    classification_head = classification_head.cuda()
+    devices = list(range(torch.cuda.device_count()))
+    logger.info("Using devices" + str(devices))
+    
+    model = torch.nn.DataParallel(model, device_ids=devices)
+    classification_head = torch.nn.DataParallel(classification_head, device_ids=devices)
+    classification_head.train()
+    model.train()
+
+    clip_loss_fn = ClipLoss(
+        local_loss=False,
+        gather_with_grad=False,
+        cache_labels=True,
+        rank=0,
+        world_size=1,
+        use_horovod=False,
+        ls=args.ls,
+    )
+
+    clip_params = list(model.parameters())
+    total_params = clip_params
+    params = [p for p in total_params if p.requires_grad]
+    optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.wd)
+
+    scheduler = cosine_lr(
+        optimizer, args.lr, args.warmup_length, args.epochs * num_batches, args.min_lr
+    )
+
+    stats = []
+    
+    #! inference flag
+    if args.epochs == 0:
+        epoch = 0
+        print("Epoch : ", epoch)
+        epoch_stats = {}
+        epoch_stats["epoch"] = epoch
+        args.current_epoch = epoch
+        
+        print("Start evaluation")
+        classification_head_new = get_zeroshot_classifier(args, model.module.model)
+        classification_head_new = classification_head_new.cuda()
+        eval_results = evaluate(
+            model, args, classification_head_new, epoch_stats, logger
+        )
+        wandb.log({k: v for k, v in epoch_stats.items()})
+        exit()
+
+    for epoch in tqdm(range(0, args.epochs), desc="Epochs"):
+        print("\nEpoch : ", epoch)
+        epoch_stats = {}
+        epoch_stats["epoch"] = epoch
+        id_flyp_loss_sum = 0
+        ldreg_loss_sum = 0
+        mean_lid_sum = 0
+        clip_loss_sum = 0
+        supcon_logged_this_epoch = False
+        model.train()
+        model = model.cuda()
+        classification_head.train()
+
+        for i in tqdm(range(num_batches), desc="Batches"):
+            start_time = time.time()
+            step = i + epoch * num_batches
+            if epoch != -1:
+                scheduler(step)
+            optimizer.zero_grad()
+
+            try:
+                ft_batch = next(ft_iterator)
+            except StopIteration:
+                ft_iterator = iter(ft_dataloader)
+                ft_batch = next(ft_iterator)
+
+            # Try to unpack labels if available
+            ft_labels = None
+            use_supcon = False
+            if len(ft_batch) == 3:
+                ft_image, ft_text, ft_labels = ft_batch
+                ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
+                ft_labels = ft_labels.cuda()
+                use_supcon = True
+                if not supcon_logged_this_epoch:
+                    logger.info(f"Using supervised CLIP loss with labels for epoch {epoch}")
+                    supcon_logged_this_epoch = True
+            else:
+                ft_image, ft_text = ft_batch
+                ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
+
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32):
+                ft_image_features, ft_text_features, logit_scale2 = model(
+                    ft_image, ft_text
+                )
+                
+                lscale = logit_scale2 if len(devices) == 1 else logit_scale2[0]
+                
+                # Use ClipLoss with ground_labels for supervised contrastive learning
+                ft_clip_loss, logits_per_image, logits_per_text = clip_loss_fn(
+                    ft_image_features, ft_text_features, lscale,
+                    ground_labels=ft_labels, google_sup_loss=use_supcon
+                )
+
+                #! LDReg regularization
+                ldreg_loss, mean_lid = 0.0, 0.0
+                ldreg_loss_val = 0.0
+                if args.ldreg_coef > 0:
+                    # Compute LID regularization on image features
+                    ldreg_loss, mean_lid = compute_ldreg_loss(
+                        ft_image_features, 
+                        k=args.ldreg_k, 
+                        reg_type=args.ldreg_type
+                    )
+                    ldreg_loss_val = ldreg_loss.item()
+                    ft_clip_loss += args.ldreg_coef * ldreg_loss
+                    ldreg_loss_sum += args.ldreg_coef * ldreg_loss_val
+                    mean_lid_sum += mean_lid
+
+            if fp16_scaler is None:
+                ft_clip_loss.backward()
+                # Apply gradient clipping if specified
+                grad_norm = None
+                if args.max_grad_norm > 0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
+                optimizer.step()
+            else:
+                fp16_scaler.scale(ft_clip_loss).backward()
+                # Apply gradient clipping if specified
+                grad_norm = None
+                if args.max_grad_norm > 0:
+                    fp16_scaler.unscale_(optimizer)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
+                fp16_scaler.step(optimizer)
+                fp16_scaler.update()
+
+            # Track losses
+            clip_loss_item = ft_clip_loss.item()
+            base_clip_loss = clip_loss_item
+            if args.ldreg_coef > 0:
+                base_clip_loss -= args.ldreg_coef * ldreg_loss_val
+            
+            id_flyp_loss_sum += clip_loss_item
+            clip_loss_sum += base_clip_loss
+
+            if i % print_every == 0:
+                percent_complete = 100 * i / num_batches
+                
+                # Prepare detailed log message
+                loss_type = "Supervised CLIP" if use_supcon else "FLYP"
+                log_msg = (
+                    f"Train Epoch: {epoch} [{percent_complete:.0f}% {i}/{num_batches}]\n"
+                    f"\tTotal Loss: {clip_loss_item:.4f}\n"
+                    f"\t{loss_type} Loss: {base_clip_loss:.4f}"
+                )
+                
+                # Prepare wandb log dict
+                wandb_log = {
+                    "Train Epoch": epoch,
+                    "Percent Complete": percent_complete,
+                    "Total Loss": clip_loss_item,
+                    f"{loss_type} Loss": base_clip_loss,
+                    "Using Supervised": use_supcon,
+                }
+                
+                # Add gradient norm if clipping is enabled
+                if args.max_grad_norm > 0 and grad_norm is not None:
+                    log_msg += f"\n\tGradient Norm: {grad_norm:.4f} (max: {args.max_grad_norm})"
+                    wandb_log.update({
+                        "Gradient Norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                        "Max Grad Norm": args.max_grad_norm,
+                    })
+                
+                # Add LDReg loss if applicable
+                if args.ldreg_coef > 0:
+                    log_msg += f"\n\tLDReg Loss: {args.ldreg_coef * ldreg_loss_val:.4f} (Raw: {ldreg_loss_val:.4f})"
+                    log_msg += f"\n\tMean LID: {mean_lid:.2f}"
+                    wandb_log.update({
+                        "LDReg Loss": args.ldreg_coef * ldreg_loss_val,
+                        "LDReg Raw Loss": ldreg_loss_val,
+                        "Mean LID": mean_lid,
+                    })
+                
+                # Add learning rate
+                current_lr = optimizer.param_groups[0]['lr']
+                log_msg += f"\n\tLearning Rate: {current_lr:.6f}"
+                wandb_log.update({"Learning Rate": current_lr})
+                
+                # Add logit scale
+                log_msg += f"\n\tLogit Scale: {lscale.exp().item():.4f}"
+                wandb_log.update({"Logit Scale": lscale.exp().item()})
+                
+                logger.info(log_msg)
+                wandb.log(wandb_log)
+
+        # Compute averages at the end of each epoch
+        id_flyp_loss_avg = id_flyp_loss_sum / num_batches
+        clip_loss_avg = clip_loss_sum / num_batches
+
+        # Update epoch stats
+        epoch_stats["Avg Total Loss"] = round(id_flyp_loss_avg, 4)
+        epoch_stats["Avg FLYP Loss"] = round(clip_loss_avg, 4)
+
+        logger.info(f"Epoch {epoch} Summary:")
+        logger.info(f"  Avg Total Loss: {id_flyp_loss_avg:.4f}")
+        logger.info(f"  Avg FLYP Loss: {clip_loss_avg:.4f}")
+
+        if args.ldreg_coef > 0:
+            ldreg_loss_avg = ldreg_loss_sum / num_batches
+            mean_lid_avg = mean_lid_sum / num_batches
+            epoch_stats["Avg LDReg Loss"] = round(ldreg_loss_avg, 4)
+            epoch_stats["Avg Mean LID"] = round(mean_lid_avg, 2)
+            logger.info(f"  Avg LDReg Loss: {ldreg_loss_avg:.4f}")
+            logger.info(f"  Avg Mean LID: {mean_lid_avg:.2f}")
+
+        # Log final learning rate for the epoch
+        final_lr = optimizer.param_groups[0]['lr']
+        epoch_stats["Final LR"] = final_lr
+        logger.info(f"  Final Learning Rate: {final_lr:.6f}")
+
+        # Evaluate
+        args.current_epoch = epoch
+        classification_head_new = get_zeroshot_classifier(args, model.module.model)
+        classification_head_new = classification_head_new.cuda()
+
+        # Saving model
+        if args.save is not None:
+            os.makedirs(args.save, exist_ok=True)
+            model_path = os.path.join(args.save, f"checkpoint_{epoch+1}.pt")
+            logger.info("Saving model to" + str(model_path))
+            model.module.save(model_path)
+            optim_path = os.path.join(args.save, f"optim_{epoch+1}.pt")
+            torch.save(optimizer.state_dict(), optim_path)
+
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32), torch.no_grad():
+            evaluate(model, args, classification_head_new, epoch_stats, logger)
+
+        ood_acc = 0
+        num_datasets = 0
+        for k, v in epoch_stats.items():
+            if "Accuracy" in k:
+                if k == "ImageNet Accuracy":
+                    # ignore the ID acc term
+                    continue
+                ood_acc += v
+                num_datasets += 1
+        if num_datasets != 0:
+            ood_acc = ood_acc / num_datasets
+        else:
+            ood_acc = 0
+
+        epoch_stats["Avg OOD Acc"] = round(ood_acc, 4)
+        logger.info(f"Avg OOD Acc : {ood_acc:.4f}")
+        
+        stats.append(epoch_stats)
+        stats_df = pd.DataFrame(stats)
+        
+        # Define model flag for more descriptive log directory
+        mod_flag = args.model.split('/')[-1] if '/' in args.model else args.model
+        
+        log_dir = (
+            "expt_logs/"
+            + args.exp_name
+            + "/"
+            + f"{mod_flag}_ep{args.epochs}"
+            + f"_BS{args.batch_size}"
+            + f"_WD{args.wd}"
+            + f"_LR{args.lr}"
+            + f"_LDReg{args.ldreg_coef}"
+            + f"_k{args.ldreg_k}"
+            + f"_run{args.run}"
+        )
+        os.makedirs(log_dir, exist_ok=True)
+        stats_df.to_csv(log_dir + "/stats.tsv", sep="\t")
+
+        #! wandb logging
+        wandb.log({k: v for k, v in epoch_stats.items()})
+
+    if args.save is not None:
+        return model_path 

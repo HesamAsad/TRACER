@@ -387,6 +387,21 @@ def parse_arguments():
         default=100.0,
         help="Multiplier for maximum gradient norm for gradient clipping",
     )
+    
+    # Layer freezing parameters
+    parser.add_argument(
+        "--freeze_text_encoder",
+        action="store_true",
+        default=False,
+        help="Freeze the text encoder (transformer) parameters. Default: False (trainable)",
+    )
+    
+    parser.add_argument(
+        "--trainable_layers",
+        type=int,
+        default=-1,
+        help="Number of last layers to keep trainable in both encoders. -1 means all layers trainable, 0 means all frozen, N means last N layers trainable",
+    )
 
     parsed_args = parser.parse_args()
 
@@ -395,3 +410,16 @@ def parse_arguments():
     if parsed_args.load is not None and len(parsed_args.load) == 1:
         parsed_args.load = parsed_args.load[0]
     return parsed_args
+
+
+# # 1. Freeze entire text encoder (ALL text components)
+# python train.py --method carot --freeze_text_encoder
+
+# # 2. Fine-tune only last 2 transformer layers + embeddings/projections  
+# python train.py --method carot --trainable_layers 2
+
+# # 3. Extreme fine-tuning: only logit_scale trainable
+# python train.py --method carot --trainable_layers 0
+
+# # 4. Text frozen + only vision embeddings/projections trainable
+# python train.py --method carot --freeze_text_encoder --trainable_layers 0

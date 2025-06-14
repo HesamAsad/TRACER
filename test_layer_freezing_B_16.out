@@ -1,0 +1,164 @@
+INFO: Text encoder remains trainable
+INFO: No selective layer freezing applied - all layers remain trainable (except text encoder if frozen)
+INFO: Logit scale remains trainable
+INFO: Parameter summary:
+INFO:   Total parameters: 149,620,737
+INFO:   Trainable parameters: 149,620,737 (100.0%)
+INFO:   Frozen parameters: 0 (0.0%)
+INFO:   Text transformer: 37,828,608/37,828,608 trainable (100.0%)
+INFO:   Visual encoder: 86,192,640/86,192,640 trainable (100.0%)
+INFO: Freezing entire text encoder
+INFO:   - Froze Transformer layers
+INFO:   - Froze Token embeddings
+INFO:   - Froze Positional embeddings
+INFO:   - Froze Final layer norm
+INFO:   - Froze Text projection
+INFO: No selective layer freezing applied - all layers remain trainable (except text encoder if frozen)
+INFO: Logit scale remains trainable
+INFO: Parameter summary:
+INFO:   Total parameters: 149,620,737
+INFO:   Trainable parameters: 86,192,641 (57.6%)
+INFO:   Frozen parameters: 63,428,096 (42.4%)
+INFO:   Text transformer: 0/37,828,608 trainable (0.0%)
+INFO:   Visual encoder: 86,192,640/86,192,640 trainable (100.0%)
+INFO: Text encoder remains trainable
+INFO: Applying selective layer freezing - keeping last 2 layers trainable
+INFO: Froze first 10 text transformer layers, keeping last 2 + embeddings/projections trainable
+INFO: Froze first 10 ViT layers, keeping last 2 + embeddings/projections trainable
+INFO: Logit scale remains trainable
+INFO: Parameter summary:
+INFO:   Total parameters: 149,620,737
+INFO:   Trainable parameters: 47,218,177 (31.6%)
+INFO:   Frozen parameters: 102,402,560 (68.4%)
+INFO:   Text transformer: 6,304,768/37,828,608 trainable (16.7%)
+INFO:   Visual encoder: 15,313,920/86,192,640 trainable (17.8%)
+INFO: Freezing entire text encoder
+INFO:   - Froze Transformer layers
+INFO:   - Froze Token embeddings
+INFO:   - Froze Positional embeddings
+INFO:   - Froze Final layer norm
+INFO:   - Froze Text projection
+INFO: Applying selective layer freezing - keeping last 1 layers trainable
+INFO: Froze first 11 ViT layers, keeping last 1 + embeddings/projections trainable
+INFO: Logit scale remains trainable
+INFO: Parameter summary:
+INFO:   Total parameters: 149,620,737
+INFO:   Trainable parameters: 8,226,049 (5.5%)
+INFO:   Frozen parameters: 141,394,688 (94.5%)
+INFO:   Text transformer: 0/37,828,608 trainable (0.0%)
+INFO:   Visual encoder: 8,226,048/86,192,640 trainable (9.5%)
+INFO: Text encoder remains trainable
+INFO: Applying selective layer freezing - keeping last 0 layers trainable
+INFO: Froze entire text encoder (12 transformer layers + embeddings + projections)
+INFO: Froze entire ViT encoder (12 transformer layers + embeddings + projections)
+INFO: Logit scale remains trainable
+INFO: Parameter summary:
+INFO:   Total parameters: 149,620,737
+INFO:   Trainable parameters: 1 (0.0%)
+INFO:   Frozen parameters: 149,620,736 (100.0%)
+INFO:   Text transformer: 0/37,828,608 trainable (0.0%)
+INFO:   Visual encoder: 0/86,192,640 trainable (0.0%)
+
+================================================================================
+CLIP MODEL STRUCTURE
+================================================================================
+ViT-B/16
+
+Text Encoder (Transformer) Structure:
+  Total transformer layers: 12
+    Layer 0: ResidualAttentionBlock
+    Layer 1: ResidualAttentionBlock
+    Layer 2: ResidualAttentionBlock
+    Layer 3: ResidualAttentionBlock
+    Layer 4: ResidualAttentionBlock
+    Layer 5: ResidualAttentionBlock
+    Layer 6: ResidualAttentionBlock
+    Layer 7: ResidualAttentionBlock
+    Layer 8: ResidualAttentionBlock
+    Layer 9: ResidualAttentionBlock
+    Layer 10: ResidualAttentionBlock
+    Layer 11: ResidualAttentionBlock
+
+Vision Encoder Structure:
+  Vision Transformer layers: 12
+    Layer 0: ResidualAttentionBlock
+    Layer 1: ResidualAttentionBlock
+    Layer 2: ResidualAttentionBlock
+    Layer 3: ResidualAttentionBlock
+    Layer 4: ResidualAttentionBlock
+    Layer 5: ResidualAttentionBlock
+    Layer 6: ResidualAttentionBlock
+    Layer 7: ResidualAttentionBlock
+    Layer 8: ResidualAttentionBlock
+    Layer 9: ResidualAttentionBlock
+    Layer 10: ResidualAttentionBlock
+    Layer 11: ResidualAttentionBlock
+================================================================================
+TESTING LAYER FREEZING FUNCTIONALITY
+================================================================================
+
+Loading CLIP model...
+ViT-B/16
+
+==================== SCENARIO 1: Default (everything trainable) ====================
+ViT-B/16
+
+Configuration:
+  freeze_text_encoder: False
+  trainable_layers: -1
+
+==================== SCENARIO 2: Freeze entire text encoder (embeddings + transformers + projections) ====================
+ViT-B/16
+
+Configuration:
+  freeze_text_encoder: True
+  trainable_layers: -1
+
+==================== SCENARIO 3: Keep only last 2 transformer layers trainable (+ embeddings/projections) ====================
+ViT-B/16
+
+Configuration:
+  freeze_text_encoder: False
+  trainable_layers: 2
+
+==================== SCENARIO 4: Freeze text encoder + keep last 1 vision layer trainable ====================
+ViT-B/16
+
+Configuration:
+  freeze_text_encoder: True
+  trainable_layers: 1
+
+==================== SCENARIO 5: Freeze everything except logit_scale (extreme fine-tuning) ====================
+ViT-B/16
+
+Configuration:
+  freeze_text_encoder: False
+  trainable_layers: 0
+
+================================================================================
+COMMAND LINE USAGE EXAMPLES
+================================================================================
+
+1. Default: All components trainable:
+   python train.py --method carot
+
+2. Freeze entire text encoder (embeddings + transformers + projections):
+   python train.py --method carot --freeze_text_encoder
+
+3. Keep only last 2 transformer layers trainable (+ embeddings/projections):
+   python train.py --method carot --trainable_layers 2
+
+4. Freeze text encoder completely + keep only last 1 vision layer trainable:
+   python train.py --method carot --freeze_text_encoder --trainable_layers 1
+
+5. Freeze everything except logit_scale (extreme fine-tuning):
+   python train.py --method carot --trainable_layers 0
+
+6. Fine-tune only vision embeddings and projections (freeze all transformers):
+   python train.py --method carot --freeze_text_encoder --trainable_layers 0
+
+================================================================================
+TESTING COMPLETED SUCCESSFULLY!
+You can now use --freeze_text_encoder and --trainable_layers arguments
+in your training commands.
+================================================================================

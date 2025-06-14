@@ -99,6 +99,193 @@ def cosine_grad_norm_scheduler(initial_norm, final_norm, steps):
     return _grad_norm_adjuster
 
 
+def apply_layer_freezing(model, args, logger):
+    """
+    Apply layer freezing based on arguments.
+    Handles all CLIP components: embeddings, transformers, projections, and pooling layers.
+    
+    Args:
+        model: The CLIP model
+        args: Arguments containing freeze_text_encoder and trainable_layers
+        logger: Logger for reporting
+    """
+    
+    # 1. Freeze text encoder if requested (entire text encoder)
+    if args.freeze_text_encoder:
+        logger.info("Freezing entire text encoder")
+        # Freeze all text-related components
+        freeze_components = [
+            ('transformer', 'Transformer layers'),
+            ('token_embedding', 'Token embeddings'),
+            ('positional_embedding', 'Positional embeddings'),
+            ('ln_final', 'Final layer norm'),
+            ('text_projection', 'Text projection')
+        ]
+        
+        for component_name, description in freeze_components:
+            if hasattr(model.model, component_name):
+                component = getattr(model.model, component_name)
+                if hasattr(component, 'parameters'):
+                    for param in component.parameters():
+                        param.requires_grad = False
+                elif isinstance(component, torch.nn.Parameter):
+                    component.requires_grad = False
+                logger.info(f"  - Froze {description}")
+    else:
+        logger.info("Text encoder remains trainable")
+    
+    # 2. Apply selective layer freezing if specified
+    if args.trainable_layers >= 0:
+        logger.info(f"Applying selective layer freezing - keeping last {args.trainable_layers} layers trainable")
+        
+        # Handle text encoder layers (if not completely frozen)
+        if not args.freeze_text_encoder and hasattr(model.model, 'transformer') and hasattr(model.model.transformer, 'resblocks'):
+            text_layers = model.model.transformer.resblocks
+            total_text_layers = len(text_layers)
+            
+            if args.trainable_layers == 0:
+                # Freeze entire text encoder when trainable_layers=0
+                freeze_components = [
+                    ('transformer', 'Transformer layers'),
+                    ('token_embedding', 'Token embeddings'),
+                    ('positional_embedding', 'Positional embeddings'), 
+                    ('ln_final', 'Final layer norm'),
+                    ('text_projection', 'Text projection')
+                ]
+                
+                for component_name, description in freeze_components:
+                    if hasattr(model.model, component_name):
+                        component = getattr(model.model, component_name)
+                        if hasattr(component, 'parameters'):
+                            for param in component.parameters():
+                                param.requires_grad = False
+                        elif isinstance(component, torch.nn.Parameter):
+                            component.requires_grad = False
+                logger.info(f"Froze entire text encoder ({total_text_layers} transformer layers + embeddings + projections)")
+                
+            elif args.trainable_layers < total_text_layers:
+                # Freeze first layers, keep last N trainable + keep embeddings/projections trainable
+                freeze_until = total_text_layers - args.trainable_layers
+                for i, layer in enumerate(text_layers):
+                    if i < freeze_until:
+                        for param in layer.parameters():
+                            param.requires_grad = False
+                logger.info(f"Froze first {freeze_until} text transformer layers, keeping last {args.trainable_layers} + embeddings/projections trainable")
+            else:
+                logger.info(f"All {total_text_layers} text layers remain trainable (requested {args.trainable_layers} >= total)")
+        
+        # Handle vision encoder
+        if hasattr(model.model, 'visual'):
+            visual_model = model.model.visual
+            
+            # Check if it's a Vision Transformer
+            if hasattr(visual_model, 'transformer') and hasattr(visual_model.transformer, 'resblocks'):
+                # ViT case
+                vision_layers = visual_model.transformer.resblocks
+                total_vision_layers = len(vision_layers)
+                
+                if args.trainable_layers == 0:
+                    # Freeze entire vision encoder
+                    vit_components = [
+                        ('conv1', 'Patch embedding conv'),
+                        ('class_embedding', 'Class token embedding'),
+                        ('positional_embedding', 'Positional embeddings'),
+                        ('ln_pre', 'Pre-transformer layer norm'),
+                        ('transformer', 'Vision transformer layers'),
+                        ('ln_post', 'Post-transformer layer norm'),
+                        ('proj', 'Vision projection')
+                    ]
+                    
+                    for component_name, description in vit_components:
+                        if hasattr(visual_model, component_name):
+                            component = getattr(visual_model, component_name)
+                            if hasattr(component, 'parameters'):
+                                for param in component.parameters():
+                                    param.requires_grad = False
+                            elif isinstance(component, torch.nn.Parameter):
+                                component.requires_grad = False
+                    logger.info(f"Froze entire ViT encoder ({total_vision_layers} transformer layers + embeddings + projections)")
+                    
+                elif args.trainable_layers < total_vision_layers:
+                    # Freeze first layers, keep last N trainable + keep embeddings/projections trainable
+                    freeze_until = total_vision_layers - args.trainable_layers
+                    for i, layer in enumerate(vision_layers):
+                        if i < freeze_until:
+                            for param in layer.parameters():
+                                param.requires_grad = False
+                    logger.info(f"Froze first {freeze_until} ViT layers, keeping last {args.trainable_layers} + embeddings/projections trainable")
+                else:
+                    logger.info(f"All {total_vision_layers} ViT layers remain trainable (requested {args.trainable_layers} >= total)")
+            
+            # Check if it's a ResNet
+            elif hasattr(visual_model, 'layer1'):
+                # ResNet case - we have layer1, layer2, layer3, layer4
+                resnet_layers = [visual_model.layer1, visual_model.layer2, visual_model.layer3, visual_model.layer4]
+                total_resnet_layers = len(resnet_layers)
+                
+                if args.trainable_layers == 0:
+                    # Freeze entire ResNet encoder
+                    resnet_components = [
+                        # Stem layers
+                        ('conv1', 'Stem conv1'), ('bn1', 'Stem bn1'),
+                        ('conv2', 'Stem conv2'), ('bn2', 'Stem bn2'), 
+                        ('conv3', 'Stem conv3'), ('bn3', 'Stem bn3'),
+                        ('avgpool', 'Stem avgpool'),
+                        # Main layers
+                        ('layer1', 'ResNet layer1'), ('layer2', 'ResNet layer2'),
+                        ('layer3', 'ResNet layer3'), ('layer4', 'ResNet layer4'),
+                        # Attention pooling
+                        ('attnpool', 'Attention pooling')
+                    ]
+                    
+                    for component_name, description in resnet_components:
+                        if hasattr(visual_model, component_name):
+                            component = getattr(visual_model, component_name)
+                            if hasattr(component, 'parameters'):
+                                for param in component.parameters():
+                                    param.requires_grad = False
+                    logger.info(f"Froze entire ResNet encoder (stem + {total_resnet_layers} layers + attention pooling)")
+                    
+                elif args.trainable_layers < total_resnet_layers:
+                    # Freeze first layers, keep last N trainable + keep stem/pooling trainable
+                    freeze_until = total_resnet_layers - args.trainable_layers
+                    for i, layer in enumerate(resnet_layers):
+                        if i < freeze_until:
+                            for param in layer.parameters():
+                                param.requires_grad = False
+                    logger.info(f"Froze first {freeze_until} ResNet layers, keeping last {args.trainable_layers} + stem/pooling trainable")
+                else:
+                    logger.info(f"All {total_resnet_layers} ResNet layers remain trainable (requested {args.trainable_layers} >= total)")
+    else:
+        logger.info("No selective layer freezing applied - all layers remain trainable (except text encoder if frozen)")
+    
+    # 3. Always keep logit_scale trainable (it's a global parameter)
+    if hasattr(model.model, 'logit_scale'):
+        model.model.logit_scale.requires_grad = True
+        logger.info("Logit scale remains trainable")
+    
+    # Report final parameter counts with detailed breakdown
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    frozen_params = total_params - trainable_params
+    
+    logger.info(f"Parameter summary:")
+    logger.info(f"  Total parameters: {total_params:,}")
+    logger.info(f"  Trainable parameters: {trainable_params:,} ({100*trainable_params/total_params:.1f}%)")
+    logger.info(f"  Frozen parameters: {frozen_params:,} ({100*frozen_params/total_params:.1f}%)")
+    
+    # Detailed breakdown by component
+    if hasattr(model.model, 'transformer'):
+        text_params = sum(p.numel() for p in model.model.transformer.parameters())
+        text_trainable = sum(p.numel() for p in model.model.transformer.parameters() if p.requires_grad)
+        logger.info(f"  Text transformer: {text_trainable:,}/{text_params:,} trainable ({100*text_trainable/text_params:.1f}%)")
+    
+    if hasattr(model.model, 'visual'):
+        visual_params = sum(p.numel() for p in model.model.visual.parameters())
+        visual_trainable = sum(p.numel() for p in model.model.visual.parameters() if p.requires_grad)
+        logger.info(f"  Visual encoder: {visual_trainable:,}/{visual_params:,} trainable ({100*visual_trainable/visual_params:.1f}%)")
+
+
 # def linear_schedule(base_value, final_value, cur_iter, tot_iter):
 #     '''
 #     - cur_iter : start from 0

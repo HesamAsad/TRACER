@@ -16,7 +16,7 @@ from src.args import parse_arguments
 from src.datasets_.common import get_dataloader, maybe_dictionarize
 from src.models.eval import evaluate
 from src.models.modeling import ClassificationHead, CLIPEncoder, ImageClassifier
-from src.models.utils import cosine_lr, cosine_grad_norm_scheduler, torch_load, LabelSmoothing, get_logits, clip_img_preprocessing, attack_pgd
+from src.models.utils import cosine_lr, cosine_grad_norm_scheduler, apply_layer_freezing, torch_load, LabelSmoothing, get_logits, clip_img_preprocessing, attack_pgd
 from src.models.zeroshot import get_zeroshot_classifier
 from src.datasets_.laion import get_data
 from src.models.beta_moving_average import GeneralMovingAverage, create_beta_weight_function
@@ -28,9 +28,9 @@ def carot_loss(args, clip_encoder, classification_head, logger):
 
     logger.info("Fine-tuning Using carot Loss")
     model = clip_encoder
-    # freeze text encoder of the clip
-    # for param in model.model.transformer.parameters():
-    #     param.requires_grad = False
+    
+    # Apply layer freezing based on arguments
+    apply_layer_freezing(model, args, logger)
 
     input_key = "images"
     preprocess_fn = clip_encoder.train_preprocess
@@ -92,6 +92,9 @@ def carot_loss(args, clip_encoder, classification_head, logger):
     clip_params = list(model.parameters())
     total_params = clip_params
     params = [p for p in total_params if p.requires_grad]
+    print(f"Number of trainable parameters: {len(params)}")
+    logger.info(f"Number of trainable parameters: {len(params)}")
+    wandb.log({"trainable params": len(params)})
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.wd)
 
     scheduler = cosine_lr(
