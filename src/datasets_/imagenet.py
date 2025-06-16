@@ -74,14 +74,28 @@ class ImageNet:
                                                   transform=self.preprocess)
         sampler = self.get_train_sampler()
         kwargs = {'shuffle': True} if sampler is None else {}
+        
+        # Optimize for large batch CLIP training
+        if self.batch_size >= 512:
+            # For very large batches, use fewer workers but larger prefetch
+            prefetch_factor = 4
+            actual_workers = min(self.num_workers, 3)
+        elif self.batch_size >= 256:
+            prefetch_factor = 3
+            actual_workers = min(self.num_workers, 4)
+        else:
+            prefetch_factor = 2
+            actual_workers = self.num_workers
+        
         self.train_loader = torch.utils.data.DataLoader(
             self.train_dataset,
             sampler=sampler,
             batch_size=self.batch_size,
-            num_workers=self.num_workers,
+            num_workers=actual_workers,
             pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=4,
+            persistent_workers=True if actual_workers > 0 else False,
+            prefetch_factor=prefetch_factor,
+            multiprocessing_context='spawn' if actual_workers > 0 else None,
             **kwargs,
         )
 
@@ -93,19 +107,33 @@ class ImageNet:
                 batch_size=1,
                 shuffle=True,
                 pin_memory=True,
-                persistent_workers=True,
-                prefetch_factor=4,
-                num_workers=self.num_workers)
+                persistent_workers=True if actual_workers > 0 else False,
+                prefetch_factor=prefetch_factor,
+                multiprocessing_context='spawn' if actual_workers > 0 else None,
+                num_workers=actual_workers)
 
     def populate_test(self):
         self.test_dataset = self.get_test_dataset()
+        
+        # Use similar optimization for test loader
+        if self.batch_size >= 512:
+            prefetch_factor = 4
+            actual_workers = min(self.num_workers, 3)
+        elif self.batch_size >= 256:
+            prefetch_factor = 3
+            actual_workers = min(self.num_workers, 4)
+        else:
+            prefetch_factor = 2
+            actual_workers = self.num_workers
+            
         self.test_loader = torch.utils.data.DataLoader(
             self.test_dataset,
             batch_size=self.batch_size,
-            num_workers=self.num_workers,
+            num_workers=actual_workers,
             pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=4,
+            persistent_workers=True if actual_workers > 0 else False,
+            prefetch_factor=prefetch_factor,
+            multiprocessing_context='spawn' if actual_workers > 0 else None,
             sampler=self.get_test_sampler())
 
     def get_test_path(self):

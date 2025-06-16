@@ -78,6 +78,7 @@ def parse_arguments():
                         type=float,
                         default=0.00001,
                         help="Learning rate.")
+
     parser.add_argument("--wd", type=float, default=0.1, help="Weight decay")
 
     parser.add_argument("--ls",
