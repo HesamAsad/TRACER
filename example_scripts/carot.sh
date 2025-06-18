@@ -4,7 +4,7 @@ cd /data/projects/punim1316/CaRot
 echo "working directory: $PWD"
 export PYTHONPATH="$PYTHONPATH:$PWD"
 
-lr=1e-3
+lr=1e-5
 wd=0.1
 bs=512
 ts=0.0

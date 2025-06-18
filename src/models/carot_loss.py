@@ -419,6 +419,23 @@ def carot_loss(args, clip_encoder, classification_head, logger):
 
         with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32), torch.no_grad():
             evaluate(model, args, classification_head_new, epoch_stats, logger)
+
+        ood_acc = 0
+        num_datasets = 0
+        for k, v in epoch_stats.items():
+            if "Accuracy" in k:
+                if k == "ImageNet Accuracy":
+                    # ignore the ID acc term
+                    continue
+                ood_acc += v
+                num_datasets += 1
+        if num_datasets != 0:
+            ood_acc = ood_acc / num_datasets
+        else:
+            ood_acc = 0
+
+        epoch_stats["Avg OOD Acc"] = round(ood_acc, 4)
+        logger.info(f"Avg OOD Acc : {ood_acc:.4f}")
         
         stats.append(epoch_stats)
         stats_df = pd.DataFrame(stats)

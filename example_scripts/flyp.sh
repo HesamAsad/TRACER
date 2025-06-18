@@ -16,4 +16,5 @@ python src/main.py \
 --template=openai_imagenet_template  --save=./checkpoints/ \
 --data-location=./datasets/data/ --ft_data="./datasets/csv/imagenet.csv" \
 --csv-img-key filepath --csv-caption-key title --exp_name ImageNet/${method} \
---wb_project "clip_finetune" --method $method --use_fp16 ${fp16} --run 2
+--wb_project "clip_finetune" --method $method --use_fp16 ${fp16} --run 2 \
+--max_grad_norm 0.00001 --grad_norm_multiplier 100.0 --warmup_length 500 --trainable_layers 1
