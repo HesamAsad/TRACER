@@ -461,7 +461,6 @@ def carot_loss(args, clip_encoder, classification_head, logger):
 
         #! wandb logging
         wandb.log({k: v for k, v in epoch_stats.items()})
-        # args.max_grad_norm = min(1, args.max_grad_norm * 10)
 
     if args.save is not None:
         return model_path
