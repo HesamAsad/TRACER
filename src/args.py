@@ -261,8 +261,15 @@ def parse_arguments():
     parser.add_argument(
         "--ema_up_freq",
         type=int,
-        default=0,
+        default=500,
         help="required iterations for EMA teacher update",
+    )
+    
+    parser.add_argument(
+        "--bma_up_freq",
+        type=int,
+        default=0,
+        help="required iterations for BMA teacher update (0 means update every step)",
     )
 
     parser.add_argument(
@@ -291,6 +298,27 @@ def parse_arguments():
         type=float,
         default=0.5,
         help="Beta parameter for Beta distribution-based moving average (both alpha and beta of Beta distribution)",
+    )
+    
+    parser.add_argument(
+        "--use_old_ema",
+        action="store_true",
+        default=False,
+        help="Use old momentum-based EMA implementation instead of Beta-weighted moving average",
+    )
+    
+    parser.add_argument(
+        "--entropy_threshold",
+        type=float,
+        default=0.5,
+        help="Entropy threshold for dynamic dual-teacher selection (lower = more confident)",
+    )
+    
+    parser.add_argument(
+        "--dual_teacher",
+        action="store_true",
+        default=False,
+        help="Enable dynamic dual-teacher distillation with EMA (ID) and BMA (OOD) teachers",
     )
     
     parser.add_argument(
@@ -402,6 +430,14 @@ def parse_arguments():
         type=int,
         default=-1,
         help="Number of last layers to keep trainable in both encoders. -1 means all layers trainable, 0 means all frozen, N means last N layers trainable",
+    )
+    
+    # Gradient diagnostics parameters
+    parser.add_argument(
+        "--enable_grad_diagnostics",
+        action="store_true",
+        default=False,
+        help="Enable deep gradient diagnostics for tracking gradient components and conflicts",
     )
 
     parsed_args = parser.parse_args()

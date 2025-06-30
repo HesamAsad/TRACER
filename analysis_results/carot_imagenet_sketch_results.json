@@ -1,0 +1,15 @@
+{
+  "model_name": "carot",
+  "dataset_name": "imagenet_sketch",
+  "num_samples": 50889,
+  "num_classes": 1000,
+  "feature_dim": 512,
+  "within_class_sim_mean": 0.7518722393159142,
+  "within_class_sim_std": 0.11122209568030478,
+  "between_class_sim_mean": 0.503555850327228,
+  "between_class_sim_std": 0.08106184792150656,
+  "silhouette_score": 0.03690082207322121,
+  "davies_bouldin_score": 3.812037817671557,
+  "avg_distance": 0.49679145258522867,
+  "distance_entropy": 2.9833292341220288
+}

@@ -1,0 +1,15 @@
+{
+  "model_name": "clip_base",
+  "dataset_name": "imagenet_val",
+  "num_samples": 50000,
+  "num_classes": 1000,
+  "feature_dim": 512,
+  "within_class_sim_mean": 0.727233708797719,
+  "within_class_sim_std": 0.11344926865889289,
+  "between_class_sim_mean": 0.5064241311005107,
+  "between_class_sim_std": 0.09022334166234734,
+  "silhouette_score": 0.025418218225240707,
+  "davies_bouldin_score": 3.9004708012006417,
+  "avg_distance": 0.49304577351979295,
+  "distance_entropy": 2.963197113962577
+}

@@ -1,0 +1,15 @@
+{
+  "model_name": "dinov2",
+  "dataset_name": "imagenet_sketch",
+  "num_samples": 50889,
+  "num_classes": 1000,
+  "feature_dim": 768,
+  "within_class_sim_mean": 0.46224622116935227,
+  "within_class_sim_std": 0.21344233678171004,
+  "between_class_sim_mean": 0.09144436982625984,
+  "between_class_sim_std": 0.07668000245711616,
+  "silhouette_score": 0.059182099997997284,
+  "davies_bouldin_score": 3.7853068021958913,
+  "avg_distance": 0.9078735920780551,
+  "distance_entropy": 2.4905000181237424
+}

@@ -133,10 +133,24 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
 
     if args.distil_coef:
         import copy
-        # Create Beta distribution-based moving average teacher
-        total_iterations = args.epochs * num_batches
-        weight_func = create_beta_weight_function(args.beta, total_iterations)
-        teacher_enc = GeneralMovingAverage(model.cuda(), weight_func)
+        if args.use_old_ema:
+            # Use old momentum-based EMA implementation
+            total_iterations = args.epochs * num_batches
+            teacher_enc = GeneralMovingAverage(
+                model.cuda(), 
+                weight_func=None,
+                use_old=True,
+                m_sche_src=args.m_sche_src,
+                m_sche_tar=args.m_sche_tar,
+                m_warm_up=args.m_warm_up,
+                total_steps=total_iterations,
+                ema_up_freq=args.ema_up_freq
+            )
+        else:
+            # Create Beta distribution-based moving average teacher
+            total_iterations = args.epochs * num_batches
+            weight_func = create_beta_weight_function(args.beta, total_iterations)
+            teacher_enc = GeneralMovingAverage(model.cuda(), weight_func)
 
     model = model.cuda()
 
@@ -343,13 +357,18 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
 
             #! self-distillation
             if args.distil_coef:
-                if args.ema_up_freq <= 0:
-                    # Update teacher every step
-                    teacher_enc.update()
+                if args.use_old_ema:
+                    # Old implementation needs the global step parameter
+                    teacher_enc.update(step)
                 else:
-                    # Update teacher at specified frequency
-                    if ((step % args.ema_up_freq) == 0) or (step == num_batches * args.epochs - 1):
+                    # New implementation - handle update frequency here
+                    if args.ema_up_freq <= 0:
+                        # Update teacher every step
                         teacher_enc.update()
+                    else:
+                        # Update teacher at specified frequency
+                        if ((step % args.ema_up_freq) == 0) or (step == num_batches * args.epochs - 1):
+                            teacher_enc.update()
 
             # Track base CLIP loss
             base_clip_loss = ft_clip_loss.item()
@@ -419,17 +438,27 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                 
                 # Add distillation loss if applicable
                 if args.distil_coef and isinstance(dist_loss, torch.Tensor):
-                    # Calculate training progress for beta momentum display
+                    # Calculate training progress for display
                     total_steps = num_batches * args.epochs
                     progress = step / total_steps
                     log_msg += f"\n\tDistillation Loss: {args.distil_coef * dist_loss.item():.4f} (Raw: {dist_loss.item():.4f})"
-                    log_msg += f"\n\tBeta Momentum: {current_weight:.4f} (progress: {progress:.2%})"
-                    wandb_log.update({
-                        "Distillation Loss": args.distil_coef * dist_loss.item(),
-                        "Distillation Raw Loss": dist_loss.item(),
-                        "Beta Momentum": current_weight,
-                        "Training Progress": progress,
-                    })
+                    
+                    if args.use_old_ema:
+                        log_msg += f"\n\tEMA Momentum: {current_weight:.4f} (progress: {progress:.2%})"
+                        wandb_log.update({
+                            "Distillation Loss": args.distil_coef * dist_loss.item(),
+                            "Distillation Raw Loss": dist_loss.item(),
+                            "EMA Momentum": current_weight,
+                            "Training Progress": progress,
+                        })
+                    else:
+                        log_msg += f"\n\tBeta Momentum: {current_weight:.4f} (progress: {progress:.2%})"
+                        wandb_log.update({
+                            "Distillation Loss": args.distil_coef * dist_loss.item(),
+                            "Distillation Raw Loss": dist_loss.item(),
+                            "Beta Momentum": current_weight,
+                            "Training Progress": progress,
+                        })
                 
                 # Add learning rate
                 current_lr = optimizer.param_groups[0]['lr']

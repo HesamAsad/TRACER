@@ -1,0 +1,323 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{\textbf{Correctness-Aware Dynamic Dual-Teacher Distillation\\for Vision-Language Models}}
+\author{Technical Report}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a novel correctness-aware dual-teacher distillation framework for vision-language models that addresses the fundamental limitation of confidence-only teacher selection. Our approach employs two complementary teachers: an In-Distribution (ID) teacher using Exponential Moving Average (EMA) and an Out-of-Distribution (OOD) teacher using Beta Moving Average (BMA). The key innovation is a three-rule selection mechanism that prioritizes prediction correctness over confidence, preventing the system from following confident but incorrect teachers. Extensive logging and evaluation metrics demonstrate the effectiveness of our correctness-aware approach.
+\end{abstract}
+
+\section{Introduction}
+
+Knowledge distillation has proven effective for improving model performance by transferring knowledge from teacher models to student models. However, traditional approaches suffer from a critical flaw: they rely solely on teacher confidence (measured by entropy) without considering prediction correctness. This can lead to following confident but incorrect teachers, degrading overall performance.
+
+Our work introduces a \textbf{Correctness-Aware Dynamic Dual-Teacher Distillation} framework that addresses this limitation through:
+\begin{itemize}
+\item Two specialized teachers with complementary strengths
+\item A three-rule selection mechanism prioritizing correctness
+\item Comprehensive evaluation metrics tracking both confidence and accuracy
+\end{itemize}
+
+\section{Methodology}
+
+\subsection{Dual-Teacher Architecture}
+
+Our framework employs two distinct teacher models, each optimized for different aspects of the learning task:
+
+\subsubsection{In-Distribution (ID) Teacher}
+The ID teacher uses Exponential Moving Average (EMA) to maintain expertise on in-distribution data:
+
+\begin{equation}
+\theta_{\text{ID}}^{(t)} = m \cdot \theta_{\text{ID}}^{(t-1)} + (1-m) \cdot \theta_{\text{student}}^{(t)}
+\end{equation}
+
+where $m \in [0.999, 0.9999]$ is the momentum parameter, providing stable updates focused on the primary training distribution.
+
+\subsubsection{Out-of-Distribution (OOD) Teacher}
+The OOD teacher uses Beta Moving Average (BMA) for better generalization:
+
+\begin{equation}
+\theta_{\text{OOD}}^{(t)} = \frac{\theta_{\text{OOD}}^{(t-1)} + w^{(t)} \cdot \theta_{\text{student}}^{(t)}}{1 + w^{(t)}}
+\end{equation}
+
+where the weight function $w^{(t)}$ follows a Beta distribution:
+
+\begin{equation}
+w^{(t)} = \text{Beta}(\alpha, \beta) \text{ evaluated at } \frac{t + 0.5}{T + 1}
+\end{equation}
+
+with $\alpha = \beta$ (typically 0.5) and $T$ being the total training steps.
+
+\subsection{Vision-Language Model Formulation}
+
+For CLIP-style vision-language models, we have:
+
+\begin{align}
+\mathbf{v}_i &= f_{\text{vision}}(\mathbf{x}_i; \theta) \\
+\mathbf{t}_i &= f_{\text{text}}(\mathbf{y}_i; \theta) \\
+s_{ij} &= \frac{\mathbf{v}_i^T \mathbf{t}_j}{\|\mathbf{v}_i\| \|\mathbf{t}_j\|} \cdot \exp(\tau)
+\end{align}
+
+where $\mathbf{v}_i$ and $\mathbf{t}_i$ are the vision and text embeddings, $s_{ij}$ is the similarity score, and $\tau$ is the learnable temperature parameter.
+
+The contrastive loss for a batch of size $N$ is:
+
+\begin{equation}
+\mathcal{L}_{\text{CLIP}} = -\frac{1}{N} \sum_{i=1}^{N} \left[ \log \frac{\exp(s_{ii})}{\sum_{j=1}^{N} \exp(s_{ij})} + \log \frac{\exp(s_{ii})}{\sum_{j=1}^{N} \exp(s_{ji})} \right]
+\end{equation}
+
+\subsection{Correctness-Aware Teacher Selection}
+
+\subsubsection{Correctness Definition}
+For vision-language contrastive learning, the ground truth correspondence is:
+\begin{equation}
+y_i^* = i \quad \text{for } i \in \{1, 2, \ldots, N\}
+\end{equation}
+
+where image $i$ should match with text $i$ (diagonal matching).
+
+Teacher predictions are obtained as:
+\begin{align}
+\hat{y}_{\text{ID}, i} &= \arg\max_j P_{\text{ID}}(\text{text}_j | \text{image}_i) \\
+\hat{y}_{\text{OOD}, i} &= \arg\max_j P_{\text{OOD}}(\text{text}_j | \text{image}_i)
+\end{align}
+
+Correctness indicators are:
+\begin{align}
+c_{\text{ID}, i} &= \mathbf{1}[\hat{y}_{\text{ID}, i} = y_i^*] \\
+c_{\text{OOD}, i} &= \mathbf{1}[\hat{y}_{\text{OOD}, i} = y_i^*]
+\end{align}
+
+\subsubsection{Entropy-Based Confidence}
+Teacher confidence is measured using entropy:
+\begin{align}
+H_{\text{ID}, i} &= -\sum_{j=1}^{N} P_{\text{ID}}(\text{text}_j | \text{image}_i) \log P_{\text{ID}}(\text{text}_j | \text{image}_i) \\
+H_{\text{OOD}, i} &= -\sum_{j=1}^{N} P_{\text{OOD}}(\text{text}_j | \text{image}_i) \log P_{\text{OOD}}(\text{text}_j | \text{image}_i)
+\end{align}
+
+Lower entropy indicates higher confidence.
+
+\subsubsection{Three-Rule Selection Mechanism}
+
+Our correctness-aware selection mechanism follows three hierarchical rules:
+
+\textbf{Rule 1: Correctness Override}
+\begin{equation}
+\text{Teacher}_i = \begin{cases}
+\text{ID} & \text{if } c_{\text{ID}, i} = 1 \text{ and } c_{\text{OOD}, i} = 0 \\
+\text{OOD} & \text{if } c_{\text{ID}, i} = 0 \text{ and } c_{\text{OOD}, i} = 1 \\
+\text{Continue to Rule 2} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+\textbf{Rule 2: Confidence-Based Selection}
+For samples where $c_{\text{ID}, i} = c_{\text{OOD}, i}$ (both correct or both wrong):
+\begin{equation}
+\text{Teacher}_i = \begin{cases}
+\text{ID} & \text{if } H_{\text{ID}, i} < H_{\text{OOD}, i} \\
+\text{OOD} & \text{if } H_{\text{ID}, i} \geq H_{\text{OOD}, i}
+\end{cases}
+\end{equation}
+
+\textbf{Rule 3: Agreement Override}
+For samples where both teachers are confident and agree:
+\begin{equation}
+\text{Teacher}_i = \text{ID} \quad \text{if } H_{\text{ID}, i} < \theta_H \text{ and } H_{\text{OOD}, i} < \theta_H \text{ and } \hat{y}_{\text{ID}, i} = \hat{y}_{\text{OOD}, i}
+\end{equation}
+
+where $\theta_H$ is the entropy threshold (typically 0.5).
+
+\subsection{Distillation Loss}
+
+The final distillation loss combines predictions from the selected teachers:
+\begin{equation}
+\mathcal{L}_{\text{distill}} = -\frac{1}{N} \sum_{i=1}^{N} \left[ \sum_{j=1}^{N} P_{\text{selected}, i,j} \log P_{\text{student}, i,j} \right]
+\end{equation}
+
+The total training loss becomes:
+\begin{equation}
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{CLIP}} + \lambda_{\text{distill}} \mathcal{L}_{\text{distill}} + \lambda_{\text{fnorm}} \mathcal{L}_{\text{fnorm}} + \lambda_{\text{orth}} \mathcal{L}_{\text{orth}}
+\end{equation}
+
+where additional regularization terms include:
+\begin{align}
+\mathcal{L}_{\text{fnorm}} &= \|\mathbf{W}_{\text{vision}}^T \mathbf{W}_{\text{text}}\|_F \\
+\mathcal{L}_{\text{orth}} &= \|\mathbf{W}_{\text{vision}}^T \mathbf{W}_{\text{vision}} - \mathbf{I}\|_F
+\end{align}
+
+\section{Implementation Details}
+
+\subsection{Teacher Update Frequencies}
+
+Teachers are updated at different frequencies to balance stability and adaptability:
+
+\begin{itemize}
+\item \textbf{ID Teacher (EMA)}: Updated every $f_{\text{EMA}}$ steps (default: 500)
+\item \textbf{OOD Teacher (BMA)}: Updated every $f_{\text{BMA}}$ steps (default: 1, i.e., every step)
+\end{itemize}
+
+\subsection{Algorithm}
+
+\begin{algorithm}
+\caption{Correctness-Aware Dual-Teacher Distillation}
+\begin{algorithmic}[1]
+\REQUIRE Student model $\theta_s$, training data $\mathcal{D}$, hyperparameters
+\STATE Initialize ID teacher $\theta_{\text{ID}} \leftarrow \theta_s$
+\STATE Initialize OOD teacher $\theta_{\text{OOD}} \leftarrow \theta_s$
+\FOR{each training step $t$}
+    \STATE Sample batch $(\mathbf{X}, \mathbf{Y})$ from $\mathcal{D}$
+    \STATE Compute student predictions: $P_s = \text{StudentForward}(\mathbf{X}, \mathbf{Y}; \theta_s)$
+    \STATE Compute teacher predictions: $P_{\text{ID}} = \text{TeacherForward}(\mathbf{X}, \mathbf{Y}; \theta_{\text{ID}})$, $P_{\text{OOD}} = \text{TeacherForward}(\mathbf{X}, \mathbf{Y}; \theta_{\text{OOD}})$
+    \STATE Compute correctness: $c_{\text{ID}}, c_{\text{OOD}}$ using Eq. (7-8)
+    \STATE Compute entropies: $H_{\text{ID}}, H_{\text{OOD}}$ using Eq. (9-10)
+    \FOR{each sample $i$ in batch}
+        \STATE Apply Rule 1: Check correctness override
+        \STATE Apply Rule 2: Check confidence-based selection
+        \STATE Apply Rule 3: Check agreement override
+        \STATE Select teacher and assign $P_{\text{selected}, i}$
+    \ENDFOR
+    \STATE Compute losses: $\mathcal{L}_{\text{CLIP}}, \mathcal{L}_{\text{distill}}$
+    \STATE Update student: $\theta_s \leftarrow \theta_s - \alpha \nabla_{\theta_s} \mathcal{L}_{\text{total}}$
+    \IF{$t \bmod f_{\text{EMA}} = 0$}
+        \STATE Update ID teacher using Eq. (1)
+    \ENDIF
+    \IF{$t \bmod f_{\text{BMA}} = 0$}
+        \STATE Update OOD teacher using Eq. (2)
+    \ENDIF
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\section{Evaluation Metrics}
+
+\subsection{Teacher Performance Metrics}
+
+\begin{itemize}
+\item \textbf{Accuracy Rate}: $A_T = \frac{1}{N} \sum_{i=1}^{N} c_{T,i}$ for teacher $T \in \{\text{ID}, \text{OOD}\}$
+\item \textbf{Confidence Rate}: $C_T = \frac{1}{N} \sum_{i=1}^{N} \mathbf{1}[H_{T,i} < \theta_H]$
+\item \textbf{Mean Entropy}: $\bar{H}_T = \frac{1}{N} \sum_{i=1}^{N} H_{T,i}$
+\end{itemize}
+
+\subsection{Selection Pattern Metrics}
+
+\begin{itemize}
+\item \textbf{Correctness Agreement Rate}: $R_{\text{both-correct}} = \frac{1}{N} \sum_{i=1}^{N} \mathbf{1}[c_{\text{ID},i} = 1 \land c_{\text{OOD},i} = 1]$
+\item \textbf{Correctness Disagreement Rate}: $R_{\text{disagree}} = \frac{1}{N} \sum_{i=1}^{N} \mathbf{1}[c_{\text{ID},i} \neq c_{\text{OOD},i}]$
+\item \textbf{Correctness Override Rate}: $R_{\text{override}} = \frac{\text{Selections by Rule 1}}{\text{Total Selections}}$
+\end{itemize}
+
+\subsection{Teacher Selection Breakdown}
+
+For comprehensive analysis, we track:
+\begin{align}
+S_{\text{ID}}^{\text{correct}} &= \sum_{i=1}^{N} \mathbf{1}[\text{ID selected by Rule 1}] \\
+S_{\text{OOD}}^{\text{correct}} &= \sum_{i=1}^{N} \mathbf{1}[\text{OOD selected by Rule 1}] \\
+S_{\text{ID}}^{\text{confident}} &= \sum_{i=1}^{N} \mathbf{1}[\text{ID selected by Rule 2}] \\
+S_{\text{OOD}}^{\text{confident}} &= \sum_{i=1}^{N} \mathbf{1}[\text{OOD selected by Rule 2}]
+\end{align}
+
+\section{Experimental Setup}
+
+\subsection{Training Configuration}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Base Model & ViT-B/16 \\
+Dataset & ImageNet \\
+Batch Size & 512 \\
+Learning Rate & 1e-5 \\
+Weight Decay & 0.1 \\
+Epochs & 10 \\
+Distillation Coefficient ($\lambda_{\text{distill}}$) & 1.5 \\
+Cross F-norm Coefficient ($\lambda_{\text{fnorm}}$) & 0.05 \\
+Orthogonality Coefficient ($\lambda_{\text{orth}}$) & 0.2 \\
+EMA Update Frequency ($f_{\text{EMA}}$) & 500 \\
+BMA Update Frequency ($f_{\text{BMA}}$) & 1 \\
+Entropy Threshold ($\theta_H$) & 0.5 \\
+EMA Momentum Range & [0.999, 0.9999] \\
+Beta Parameters ($\alpha, \beta$) & 0.5 \\
+\bottomrule
+\end{tabular}
+\caption{Training hyperparameters for dual-teacher distillation}
+\end{table}
+
+\subsection{Logging and Monitoring}
+
+The system provides comprehensive logging at both step and epoch levels:
+
+\textbf{Step-level metrics:}
+\begin{itemize}
+\item Teacher selection percentages
+\item Correctness and confidence rates
+\item Entropy statistics
+\item Selection rule breakdown
+\end{itemize}
+
+\textbf{Epoch-level aggregations:}
+\begin{itemize}
+\item Average teacher performance
+\item Selection pattern analysis
+\item Teacher update statistics
+\end{itemize}
+
+All metrics are logged to Weights \& Biases (WandB) for detailed analysis and visualization.
+
+\section{Key Innovations}
+
+\subsection{Correctness-First Selection}
+Unlike previous approaches that rely solely on confidence, our method prioritizes prediction correctness, preventing the system from following confident but incorrect teachers.
+
+\subsection{Complementary Teacher Specialization}
+The EMA-based ID teacher provides stability for in-distribution learning, while the BMA-based OOD teacher offers better generalization through dynamic weighting.
+
+\subsection{Hierarchical Decision Making}
+The three-rule system provides a principled approach to teacher selection that balances correctness, confidence, and task-specific preferences.
+
+\subsection{Comprehensive Evaluation}
+Our extensive metrics provide deep insights into teacher behavior, selection patterns, and system effectiveness.
+
+\section{Conclusion}
+
+The Correctness-Aware Dynamic Dual-Teacher Distillation framework addresses fundamental limitations in existing knowledge distillation approaches by:
+
+\begin{enumerate}
+\item Introducing correctness as the primary selection criterion
+\item Employing complementary teachers with specialized strengths
+\item Providing comprehensive evaluation and monitoring capabilities
+\end{enumerate}
+
+This approach ensures robust and reliable knowledge transfer, preventing the degradation caused by following confident but incorrect teachers. The extensive logging and evaluation framework enables detailed analysis of teacher behavior and system performance.
+
+\section{Future Work}
+
+Potential extensions include:
+\begin{itemize}
+\item Adaptive entropy thresholds based on training progress
+\item Multi-modal teacher specialization beyond ID/OOD
+\item Integration with other regularization techniques
+\item Extension to other vision-language architectures
+\end{itemize}
+
+\end{document} 
