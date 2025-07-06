@@ -27,7 +27,7 @@ def lid_mom_est(data, reference, k, get_idx=False,
                 compute_mode='use_mm_for_euclid_dist_if_necessary'):
     """
     Method of Moments estimation of Local Intrinsic Dimensionality (LID)
-    using angular distance for hyperspherical representations
+    using chordal distance for hyperspherical representations
     
     Args:
         data: representations that need LID to be estimated
@@ -44,18 +44,19 @@ def lid_mom_est(data, reference, k, get_idx=False,
     data = torch.flatten(data, start_dim=1)
     reference = torch.flatten(reference, start_dim=1)
     
-    # Normalize vectors to unit length for angular distance
+    # Normalize vectors to unit length for chordal distance
+    # (Note: CLIP features are already normalized, but this ensures robustness)
     data_norm = torch.nn.functional.normalize(data, p=2, dim=1)
     reference_norm = torch.nn.functional.normalize(reference, p=2, dim=1)
     
     # Compute cosine similarity matrix
     cosine_sim = torch.mm(data_norm, reference_norm.T)
     
-    # Clamp to avoid numerical issues with arccos
-    cosine_sim = torch.clamp(cosine_sim, min=-1.0 + 1e-7, max=1.0 - 1e-7)
-    
-    # Compute angular distance: arccos(x^T y)
-    r = torch.acos(cosine_sim)
+    # Compute chordal distance: sqrt(2 - 2x^T y)
+    # Stabilize by clamping the argument to avoid numerical issues
+    chord_arg = 2.0 - 2.0 * cosine_sim
+    chord_arg = torch.clamp(chord_arg, min=1e-8)  # Prevent sqrt of negative values
+    r = torch.sqrt(chord_arg)
     
     # Sort distances and get k nearest neighbors
     a, idx = torch.sort(r, dim=1)
@@ -80,7 +81,7 @@ def lid_mom_est(data, reference, k, get_idx=False,
 def compute_ldreg_loss(image_features, text_features, k=64, reg_type="l1"):
     """
     Compute LID regularization loss for both image and text modalities
-    using angular distance and sum their regularization losses
+    using chordal distance and sum their regularization losses
     
     Args:
         image_features: image representation features
