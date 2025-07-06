@@ -183,7 +183,7 @@ def parse_arguments():
 
     parser.add_argument("--workers",
                         type=int,
-                        default=4,
+                        default=6,
                         help="Number of dataloader workers per GPU.")
 
     parser.add_argument("--csv-separator",

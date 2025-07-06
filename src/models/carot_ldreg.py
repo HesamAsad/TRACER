@@ -16,7 +16,7 @@ from src.args import parse_arguments
 from src.datasets_.common import get_dataloader, maybe_dictionarize
 from src.models.eval import evaluate
 from src.models.modeling import ClassificationHead, CLIPEncoder, ImageClassifier
-from src.models.utils import cosine_lr, torch_load, LabelSmoothing, get_logits, clip_img_preprocessing, attack_pgd
+from src.models.utils import cosine_lr, torch_load, LabelSmoothing, get_logits, clip_img_preprocessing, attack_pgd, apply_layer_freezing, cosine_grad_norm_scheduler
 from src.models.zeroshot import get_zeroshot_classifier
 from src.datasets_.laion import get_data
 from src.models.beta_moving_average import GeneralMovingAverage, create_beta_weight_function
@@ -27,13 +27,14 @@ def lid_mom_est(data, reference, k, get_idx=False,
                 compute_mode='use_mm_for_euclid_dist_if_necessary'):
     """
     Method of Moments estimation of Local Intrinsic Dimensionality (LID)
+    using angular distance for hyperspherical representations
     
     Args:
         data: representations that need LID to be estimated
         reference: reference representations (usually the same batch)
         k: locality parameter, the neighbourhood size
         get_idx: whether to return indices of nearest neighbors
-        compute_mode: computation mode for cdist
+        compute_mode: computation mode for cdist (kept for compatibility)
     
     Returns:
         lids: estimated LID values for each sample
@@ -43,8 +44,18 @@ def lid_mom_est(data, reference, k, get_idx=False,
     data = torch.flatten(data, start_dim=1)
     reference = torch.flatten(reference, start_dim=1)
     
-    # Compute pairwise distances
-    r = torch.cdist(data, reference, p=2, compute_mode=compute_mode)
+    # Normalize vectors to unit length for angular distance
+    data_norm = torch.nn.functional.normalize(data, p=2, dim=1)
+    reference_norm = torch.nn.functional.normalize(reference, p=2, dim=1)
+    
+    # Compute cosine similarity matrix
+    cosine_sim = torch.mm(data_norm, reference_norm.T)
+    
+    # Clamp to avoid numerical issues with arccos
+    cosine_sim = torch.clamp(cosine_sim, min=-1.0 + 1e-7, max=1.0 - 1e-7)
+    
+    # Compute angular distance: arccos(x^T y)
+    r = torch.acos(cosine_sim)
     
     # Sort distances and get k nearest neighbors
     a, idx = torch.sort(r, dim=1)
@@ -53,44 +64,59 @@ def lid_mom_est(data, reference, k, get_idx=False,
     m = torch.mean(a[:, 1:k+1], dim=1)
     
     # Estimate LID using method of moments
-    lids = m / (a[:, k+1] - m)
+    # Handle numerical issues: if denominator is too small, use a small positive value
+    denominator = a[:, k+1] - m
+    denominator = torch.clamp(denominator, min=1e-8)  # Prevent division by zero
+    lids = m / denominator
     
     # Handle potential numerical issues
-    lids = torch.clamp(lids, min=1e-8)
+    lids = torch.clamp(lids, min=1e-8, max=1e8)  # Prevent both NaN and extreme values
     
     if get_idx:
         return idx, lids
     return lids
 
 
-def compute_ldreg_loss(features, k=64, reg_type="l1"):
+def compute_ldreg_loss(image_features, text_features, k=64, reg_type="l1"):
     """
-    Compute LID regularization loss
+    Compute LID regularization loss for both image and text modalities
+    using angular distance and sum their regularization losses
     
     Args:
-        features: representation features
+        image_features: image representation features
+        text_features: text representation features
         k: number of nearest neighbors
         reg_type: type of regularization ("l1" or "l2")
     
     Returns:
-        ldreg_loss: LID regularization loss
-        mean_lid: mean LID value for logging
+        ldreg_loss: combined LID regularization loss
+        mean_lid_image: mean LID value for image features (for logging)
+        mean_lid_text: mean LID value for text features (for logging)
     """
-    # Estimate LID for the batch
-    lids = lid_mom_est(data=features, reference=features.detach(), k=k)
+    # Estimate LID for image features
+    lids_image = lid_mom_est(data=image_features, reference=image_features.detach(), k=k)
+    
+    # Estimate LID for text features
+    lids_text = lid_mom_est(data=text_features, reference=text_features.detach(), k=k)
     
     # Compute regularization loss based on type
     if reg_type == "l1":
-        ldreg_loss = -torch.log(lids).mean()
+        ldreg_loss_image = -torch.log(lids_image).mean()
+        ldreg_loss_text = -torch.log(lids_text).mean()
     elif reg_type == "l2":
-        ldreg_loss = -torch.sqrt(torch.square(torch.log(lids))).mean()
+        ldreg_loss_image = -torch.sqrt(torch.square(torch.log(lids_image))).mean()
+        ldreg_loss_text = -torch.sqrt(torch.square(torch.log(lids_text))).mean()
     else:
         raise ValueError(f"Unknown regularization type: {reg_type}")
     
-    # Compute geometric mean of LID for logging
-    mean_lid = torch.exp(torch.log(lids).mean())
+    # Sum the regularization losses
+    ldreg_loss = ldreg_loss_image + ldreg_loss_text
     
-    return ldreg_loss, mean_lid.item()
+    # Compute geometric mean of LID for logging
+    mean_lid_image = torch.exp(torch.log(lids_image).mean())
+    mean_lid_text = torch.exp(torch.log(lids_text).mean())
+    
+    return ldreg_loss, mean_lid_image.item(), mean_lid_text.item()
 
 
 def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
@@ -98,9 +124,9 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
 
     logger.info("Fine-tuning Using CaRot Loss with LDReg")
     model = clip_encoder
-    # freeze text encoder of the clip
-    for param in clip_encoder.text_model.parameters():
-        param.requires_grad = False
+
+    # Apply layer freezing based on arguments
+    apply_layer_freezing(model, args, logger)
 
     input_key = "images"
     preprocess_fn = clip_encoder.train_preprocess
@@ -132,7 +158,6 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
         model = model.load(args.clip_load)
 
     if args.distil_coef:
-        import copy
         # Create Beta distribution-based moving average teacher
         total_iterations = args.epochs * num_batches
         weight_func = create_beta_weight_function(args.beta, total_iterations)
@@ -163,16 +188,25 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
     clip_params = list(model.parameters())
     total_params = clip_params
     params = [p for p in total_params if p.requires_grad]
+    print(f"Number of trainable parameters: {len(params)}")
+    logger.info(f"Number of trainable parameters: {len(params)}")
+    wandb.log({"trainable params": len(params)})
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.wd)
 
     scheduler = cosine_lr(
         optimizer, args.lr, args.warmup_length, args.epochs * num_batches, args.min_lr
     )
 
+    # Initialize gradient norm scheduler
+    initial_grad_norm = args.max_grad_norm  # Start from initial value (0.0001)
+    final_grad_norm = args.max_grad_norm * args.grad_norm_multiplier  # Target final value
+    grad_norm_scheduler = cosine_grad_norm_scheduler(
+        initial_grad_norm, final_grad_norm, args.epochs * num_batches
+    )
+
     stats = []
     prev_num_logits = 0
     labels_ = {}
-    
     #! inference flag
     if args.epochs == 0:
         epoch = 0
@@ -197,7 +231,8 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
         # Initialize tracking variables for epoch statistics
         id_carot_loss_sum = 0
         ldreg_loss_sum = 0
-        mean_lid_sum = 0
+        mean_lid_image_sum = 0
+        mean_lid_text_sum = 0
         fnorm_loss_sum = 0
         orth_loss_sum = 0
         dist_loss_sum = 0
@@ -212,6 +247,10 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
             step = i + epoch * num_batches
             if epoch != -1:
                 scheduler(step)
+
+            # Update gradient norm for this step
+            current_grad_norm = grad_norm_scheduler(step)
+
             optimizer.zero_grad()
 
             try:
@@ -271,19 +310,16 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                     orth_loss_sum += args.l_orth_wv * orth_val
 
                 #! LDReg regularization
-                ldreg_loss, mean_lid = 0.0, 0.0
-                ldreg_loss_val = 0.0
-                if args.ldreg_coef > 0:
-                    # Compute LID regularization on image features
-                    ldreg_loss, mean_lid = compute_ldreg_loss(
-                        ft_image_features, 
-                        k=args.ldreg_k, 
-                        reg_type=args.ldreg_type
-                    )
-                    ldreg_loss_val = ldreg_loss.item()
-                    ft_clip_loss += args.ldreg_coef * ldreg_loss
-                    ldreg_loss_sum += args.ldreg_coef * ldreg_loss_val
-                    mean_lid_sum += mean_lid
+                ldreg_loss, mean_lid_image, mean_lid_text = compute_ldreg_loss(
+                    ft_image_features, ft_text_features, 
+                    k=args.ldreg_k, 
+                    reg_type=args.ldreg_type
+                )
+                ldreg_loss_val = ldreg_loss.item()
+                ft_clip_loss += args.ldreg_coef * ldreg_loss
+                ldreg_loss_sum += args.ldreg_coef * ldreg_loss_val
+                mean_lid_image_sum += mean_lid_image
+                mean_lid_text_sum += mean_lid_text
 
             #! self-distillation flag
             dist_loss, current_weight = torch.tensor(0), 0.0
@@ -328,16 +364,17 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                 ft_clip_loss.backward()
                 # Apply gradient clipping if specified
                 grad_norm = None
-                if args.max_grad_norm > 0:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
+                if current_grad_norm > 0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params, current_grad_norm)
+
                 optimizer.step()
             else:
                 fp16_scaler.scale(ft_clip_loss).backward()
                 # Apply gradient clipping if specified
                 grad_norm = None
-                if args.max_grad_norm > 0:
+                if current_grad_norm > 0:
                     fp16_scaler.unscale_(optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params, current_grad_norm)
                 fp16_scaler.step(optimizer)
                 fp16_scaler.update()
 
@@ -384,11 +421,13 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                 }
                 
                 # Add gradient norm if clipping is enabled
-                if args.max_grad_norm > 0 and grad_norm is not None:
-                    log_msg += f"\n\tGradient Norm: {grad_norm:.4f} (max: {args.max_grad_norm})"
+                if current_grad_norm > 0 and grad_norm is not None:
+                    log_msg += f"\n\tGradient Norm: {grad_norm:.4f} (scheduled max: {current_grad_norm:.6f})"
                     wandb_log.update({
                         "Gradient Norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                        "Max Grad Norm": args.max_grad_norm,
+                        "Scheduled Max Grad Norm": current_grad_norm,
+                        "Initial Max Grad Norm": initial_grad_norm,
+                        "Final Max Grad Norm": final_grad_norm,
                     })
                 
                 # Add cross_fnorm loss if applicable
@@ -410,11 +449,13 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
                 # Add LDReg loss if applicable
                 if args.ldreg_coef > 0:
                     log_msg += f"\n\tLDReg Loss: {args.ldreg_coef * ldreg_loss_val:.4f} (Raw: {ldreg_loss_val:.4f})"
-                    log_msg += f"\n\tMean LID: {mean_lid:.2f}"
+                    log_msg += f"\n\tMean LID Image: {mean_lid_image:.2f}"
+                    log_msg += f"\n\tMean LID Text: {mean_lid_text:.2f}"
                     wandb_log.update({
                         "LDReg Loss": args.ldreg_coef * ldreg_loss_val,
                         "LDReg Raw Loss": ldreg_loss_val,
-                        "Mean LID": mean_lid,
+                        "Mean LID Image": mean_lid_image,
+                        "Mean LID Text": mean_lid_text,
                     })
                 
                 # Add distillation loss if applicable
@@ -466,11 +507,14 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
 
         if args.ldreg_coef > 0:
             ldreg_loss_avg = ldreg_loss_sum / num_batches
-            mean_lid_avg = mean_lid_sum / num_batches
+            mean_lid_image_avg = mean_lid_image_sum / num_batches
+            mean_lid_text_avg = mean_lid_text_sum / num_batches
             epoch_stats["Avg LDReg Loss"] = round(ldreg_loss_avg, 4)
-            epoch_stats["Avg Mean LID"] = round(mean_lid_avg, 2)
+            epoch_stats["Avg Mean LID Image"] = round(mean_lid_image_avg, 2)
+            epoch_stats["Avg Mean LID Text"] = round(mean_lid_text_avg, 2)
             logger.info(f"  Avg LDReg Loss: {ldreg_loss_avg:.4f}")
-            logger.info(f"  Avg Mean LID: {mean_lid_avg:.2f}")
+            logger.info(f"  Avg Mean LID Image: {mean_lid_image_avg:.2f}")
+            logger.info(f"  Avg Mean LID Text: {mean_lid_text_avg:.2f}")
 
         if args.distil_coef:
             dist_loss_avg = dist_loss_sum / num_batches
@@ -510,6 +554,23 @@ def carot_ldreg_loss(args, clip_encoder, classification_head, logger):
 
         with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32), torch.no_grad():
             evaluate(model, args, classification_head_new, epoch_stats, logger)
+        
+        ood_acc = 0
+        num_datasets = 0
+        for k, v in epoch_stats.items():
+            if "Accuracy" in k:
+                if k == "ImageNet Accuracy":
+                    # ignore the ID acc term
+                    continue
+                ood_acc += v
+                num_datasets += 1
+        if num_datasets != 0:
+            ood_acc = ood_acc / num_datasets
+        else:
+            ood_acc = 0
+
+        epoch_stats["Avg OOD Acc"] = round(ood_acc, 4)
+        logger.info(f"Avg OOD Acc : {ood_acc:.4f}")
         
         stats.append(epoch_stats)
         stats_df = pd.DataFrame(stats)
