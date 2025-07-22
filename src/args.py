@@ -280,6 +280,37 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        "--distillation_temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for scaling teacher logits in distillation loss. "
+             "Lower values make teacher predictions sharper, higher values make them softer. "
+             "Recommended to set to half of teacher's effective temperature.",
+    )
+
+    parser.add_argument(
+        "--adaptive_temperature",
+        action="store_true",
+        help="Enable adaptive temperature scaling based on teacher's effective temperature.",
+    )
+
+    parser.add_argument(
+        "--adaptive_temp_factor",
+        type=float,
+        default=0.5,
+        help="Factor for blending adaptive temperature with target temperature. "
+             "0.0 = use only target_temperature, 1.0 = use only effective temperature.",
+    )
+
+    parser.add_argument(
+        "--target_temperature",
+        type=float,
+        default=1.0,
+        help="Target temperature for adaptive temperature scaling. "
+             "Used as the baseline temperature to blend with effective temperature.",
+    )
+
+    parser.add_argument(
         "--m_warm_up",
         type=float,
         default=0.2,
@@ -302,6 +333,79 @@ def parse_arguments():
         "--l_orth_wv",
         type=float,
         default=0.0,
+    )
+    
+    #! Knowledge Distillation Alpha Parameters --------------------------
+    parser.add_argument(
+        "--alpha_crd",
+        type=float,
+        default=0.0,
+        help="Alpha coefficient for Contrastive Relational Distillation (CRD). "
+             "Aligns contrastive distributions between teacher and student using KL divergence.",
+    )
+    
+    parser.add_argument(
+        "--alpha_fd",
+        type=float,
+        default=0.0,
+        help="Alpha coefficient for Feature Distillation (FD). "
+             "Direct alignment of visual and text embeddings using MSE loss.",
+    )
+    
+    parser.add_argument(
+        "--alpha_mfd",
+        type=float,
+        default=0.0,
+        help="Alpha coefficient for Masked Feature Distillation (MFD). "
+             "Similar to FD but uses masked images as input to student model.",
+    )
+    
+    parser.add_argument(
+        "--alpha_gd",
+        type=float,
+        default=0.0,
+        help="Alpha coefficient for Gradient Distillation (GD). "
+             "Aligns gradient information between teacher and student using analytical gradient computation.",
+    )
+    
+    parser.add_argument(
+        "--alpha_icl",
+        type=float,
+        default=0.0,
+        help="Alpha coefficient for Interactive Contrastive Learning (ICL). "
+             "Cross-modal contrastive learning where student embeddings contrast with teacher embeddings.",
+    )
+    
+    parser.add_argument(
+        "--alpha_afd",
+        type=float,
+        default=0.0,
+        help="Alpha coefficient for Augmented Feature Distillation (AFD). "
+             "Concatenates student and teacher embeddings, then applies linear fusion encoders.",
+    )
+    
+    parser.add_argument(
+        "--alpha_cross_kd",
+        type=float,
+        default=0.0,
+        help="Alpha coefficient for Cross Knowledge Distillation (Cross KD). "
+             "Uses cross-modal teacher-student interactions aligned with teacher's same-modal logits.",
+    )
+    
+    parser.add_argument(
+        "--alpha_temp_distil",
+        type=float,
+        default=0.0,
+        help="Alpha coefficient for Temperature-scaled Distillation. "
+             "Uses temperature scaling for teacher logits in distillation loss (current implementation).",
+    )
+    
+    parser.add_argument(
+        "--mask_ratio",
+        type=float,
+        default=0.75,
+        help="Masking ratio for Masked Feature Distillation (MFD). "
+             "Fraction of image patches to mask during training.",
     )
     #! ---------------
     parser.add_argument(
