@@ -10,7 +10,7 @@ from src.datasets_.common import get_dataloader, maybe_dictionarize
 import src.datasets_ as datasets
 import torch.nn.functional as F
 
-from torchmetrics.classification import MulticlassCalibrationError
+from torchmetrics.classification import MulticlassCalibrationError, MulticlassF1Score
 import pdb
 
 import src.visualize as visualize
@@ -112,6 +112,13 @@ def eval_single_dataset(
     top1 = correct / n
     mean_ece = ece_metric(probs, ys) if args.full_eval else tot_ece / n
 
+    # Compute macro F1 score
+    if ys.numel() > 0 and y_hats.numel() > 0:
+        f1_metric = MulticlassF1Score(num_classes=int(torch.max(ys).item())+1, average="macro").to(device)
+        macro_f1 = f1_metric(y_hats.long(), ys.long()).item()
+    else:
+        macro_f1 = float('nan')
+
     if visualization:
         plot_dir = './plots'
         if not os.path.isdir(plot_dir):
@@ -135,6 +142,7 @@ def eval_single_dataset(
         metrics['top1'] = top1
 
     metrics['ece'] = mean_ece.item()
+    metrics['macro_f1'] = macro_f1
     return metrics
 
 
@@ -191,5 +199,12 @@ def evaluate(
                     logger.info(
                         f"{dataset_desc} ECE: {results['ece']:.4f}")
                 train_stats[dataset_desc + " ECE"] = round(results['ece'], 4)
+
+            if 'macro_f1' in results:
+                print(f"{dataset_desc} Macro F1: {results['macro_f1']:.4f}")
+                if logger != None:
+                    logger.info(
+                        f"{dataset_desc} Macro F1: {results['macro_f1']:.4f}")
+                train_stats[dataset_desc + " Macro F1"] = round(results['macro_f1'], 4)
 
     return info

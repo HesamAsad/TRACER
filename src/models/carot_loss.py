@@ -768,7 +768,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
         with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32), torch.no_grad():
             evaluate(model, args, classification_head_new, epoch_stats, logger)
 
-        ood_acc = 0
+        ood_acc, ood_f1 = 0, 0
         num_datasets = 0
         for k, v in epoch_stats.items():
             if "Accuracy" in k:
@@ -777,13 +777,22 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                     continue
                 ood_acc += v
                 num_datasets += 1
+            if "Macro F1" in k:
+                if k == "ImageNet Macro F1" or k == "IWildCamIDVal Macro F1":
+                    continue
+                ood_f1 += v
         if num_datasets != 0:
             ood_acc = ood_acc / num_datasets
         else:
             ood_acc = 0
-
+        if num_datasets != 0:
+            ood_f1 = ood_f1 / num_datasets
+        else:
+            ood_f1 = 0
         epoch_stats["Avg OOD Acc"] = round(ood_acc, 4)
+        epoch_stats["Avg OOD F1"] = round(ood_f1, 4)
         logger.info(f"Avg OOD Acc : {ood_acc:.4f}")
+        logger.info(f"Avg OOD F1 : {ood_f1:.4f}")
         
         stats.append(epoch_stats)
         stats_df = pd.DataFrame(stats)

@@ -44,10 +44,14 @@ class IWildCam:
                  location=os.path.expanduser('~/data'),
                  remove_non_empty=False,
                  batch_size=128,
-                 num_workers=16,
+                 num_workers=8,
+                 method=None,
+                 flag=None,
                  classnames=None,
                  subset='train'):
         self.dataset = wilds.get_dataset(dataset='iwildcam', root_dir=location)
+        self.method = method
+        self.flag = flag
         self.train_dataset = self.dataset.get_subset('train', transform=preprocess)
         self.train_loader = get_train_loader("standard", self.train_dataset, num_workers=num_workers, batch_size=batch_size)
 

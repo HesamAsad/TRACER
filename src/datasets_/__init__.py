@@ -5,3 +5,4 @@ from .imagenet_r import ImageNetRValClasses, ImageNetR
 from .imagenet_sketch import ImageNetSketch
 from .imagenet_vid_robust import ImageNetVidRobustValClasses, ImageNetVidRobust
 from .iwildcam import IWildCamIDVal, IWildCamID, IWildCamOOD, IWildCamIDNonEmpty, IWildCamOODNonEmpty, IWildCam
+from .objectnet import ObjectNetValClasses, ObjectNet
