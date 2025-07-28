@@ -11,9 +11,9 @@ ts=0.0
 method=carot
 fp16=1
 
-for sd in 0.85
+for sd in 1.5
 do
-  for oc in 0.0
+  for oc in 0.2
   do
 
     python src/main.py \

@@ -189,6 +189,9 @@ def eval_single_dataset(
         # Log to wandb if available
         try:
             if wandb.run is not None:
+                # Prepare all metrics in a single dictionary to avoid step jumps
+                wandb_metrics = {}
+                
                 # === VISUAL COMPONENTS (size-dependent) ===
                 if num_classes <= 50:  # Only visualize confusion matrix for small datasets
                     plt.figure(figsize=(12, 10))
@@ -197,8 +200,8 @@ def eval_single_dataset(
                     plt.ylabel('True Label')
                     plt.xlabel('Predicted Label')
                     
-                    # Log confusion matrix image to wandb
-                    wandb.log({f"{dataset_name}/confusion_matrix": wandb.Image(plt)})
+                    # Add confusion matrix image to metrics
+                    wandb_metrics[f"{dataset_name}/confusion_matrix"] = wandb.Image(plt)
                     plt.close()
                 else:
                     # For large datasets, create alternative visualizations
@@ -212,41 +215,41 @@ def eval_single_dataset(
                     plt.title(f'Distribution of Per-class Accuracies - {dataset_name}')
                     plt.axvline(class_accuracies.mean(), color='red', linestyle='--', label=f'Mean: {class_accuracies.mean():.3f}')
                     plt.legend()
-                    wandb.log({f"{dataset_name}/class_accuracy_distribution": wandb.Image(plt)})
+                    wandb_metrics[f"{dataset_name}/class_accuracy_distribution"] = wandb.Image(plt)
                     plt.close()
                 
                 # === NON-VISUAL LOGGING (for all datasets) ===
                 
-                # Log basic classification metrics
-                wandb.log({
+                # Add basic classification metrics
+                wandb_metrics.update({
                     f"{dataset_name}/macro_f1": macro_f1,
                     f"{dataset_name}/accuracy": top1,
                     f"{dataset_name}/ece": mean_ece.item(),
                 })
                 
-                # Log per-class metrics from classification report
+                # Add per-class metrics from classification report
                 for class_idx in range(num_classes):
                     if str(class_idx) in class_report:
                         class_metrics = class_report[str(class_idx)]
-                        wandb.log({
+                        wandb_metrics.update({
                             f"{dataset_name}/class_{class_idx}_precision": class_metrics.get('precision', 0),
                             f"{dataset_name}/class_{class_idx}_recall": class_metrics.get('recall', 0),
                             f"{dataset_name}/class_{class_idx}_f1": class_metrics.get('f1-score', 0),
                             f"{dataset_name}/class_{class_idx}_support": class_metrics.get('support', 0),
                         })
                 
-                # Log prediction distribution to detect class collapse (all datasets)
+                # Add prediction distribution to detect class collapse (all datasets)
                 pred_counts = np.bincount(y_pred, minlength=num_classes)
                 true_counts = np.bincount(y_true, minlength=num_classes)
                 
                 for class_idx in range(num_classes):
-                    wandb.log({
+                    wandb_metrics.update({
                         f"{dataset_name}/class_{class_idx}_pred_count": pred_counts[class_idx],
                         f"{dataset_name}/class_{class_idx}_true_count": true_counts[class_idx],
                     })
                 
-                # Log class performance summary statistics (all datasets)
-                wandb.log({
+                # Add class performance summary statistics (all datasets)
+                wandb_metrics.update({
                     f"{dataset_name}/class_acc_mean": class_accuracies.mean(),
                     f"{dataset_name}/class_acc_std": class_accuracies.std(),
                     f"{dataset_name}/class_acc_min": class_accuracies.min(),
@@ -257,12 +260,11 @@ def eval_single_dataset(
                     f"{dataset_name}/classes_with_high_acc": np.sum(class_accuracies > 0.9),  # >90% accuracy
                 })
                 
-                # Log worst and best performing classes (all datasets)
-                worst_classes = np.argsort(class_accuracies)[:10]  # 10 worst classes
-                best_classes = np.argsort(class_accuracies)[-10:]  # 10 best classes
-                
                 # Show worst and best performing classes in console for large datasets
                 if num_classes > 50:
+                    worst_classes = np.argsort(class_accuracies)[:10]  # 10 worst classes
+                    best_classes = np.argsort(class_accuracies)[-10:]  # 10 best classes
+                    
                     print(f"\n=== Top 10 Worst Performing Classes for {dataset_name} ===")
                     for i, class_idx in enumerate(worst_classes):
                         if class_totals[class_idx] > 0:
@@ -272,6 +274,9 @@ def eval_single_dataset(
                     for i, class_idx in enumerate(reversed(best_classes)):
                         if class_totals[class_idx] > 0:
                             print(f"{i+1}. Class {class_idx}: {class_accuracies[class_idx]:.4f} ({class_correct[class_idx]}/{class_totals[class_idx]})")
+                
+                # Log all metrics at once to avoid step jumps
+                # wandb.log(wandb_metrics)
                 
         except Exception as e:
             print(f"Warning: Could not log to wandb: {e}")
