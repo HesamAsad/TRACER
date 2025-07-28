@@ -404,7 +404,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                 #* orthogonality constraint
                 if args.l_orth_wv:
                     if args.model[:3] != 'ViT':
-                        covv = model.module.model.visual.attnpool.c_proj.weight.T @ model.module.model.visual.attnpool.c_proj
+                        covv = model.module.model.visual.attnpool.c_proj.weight.T @ model.module.model.visual.attnpool.c_proj.weight
                     else:
                         covv = model.module.model.visual.proj.T @ model.module.model.visual.proj
                     orth_val = ((covv - torch.eye(covv.shape[0], device=covv.device))**2).sum()**(1/2)
