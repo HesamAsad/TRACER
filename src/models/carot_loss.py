@@ -6,7 +6,7 @@ import wandb
 import pdb
 
 import torch
-torch.set_default_dtype(torch.bfloat16)
+# torch.set_default_dtype(torch.bfloat16)  # Removed: causes BatchNorm dtype issues with mixed precision
 from torch.nn import functional as F
 import pandas as pd
 import clip.clip as clip
@@ -23,6 +23,19 @@ from src.models.beta_moving_average import GeneralMovingAverage, create_beta_wei
 from src.models.clip_knowledge_distillation import create_clip_kd_module
 import src.datasets_ as datasets
 
+
+def fix_batchnorm_dtype_for_mixed_precision(model):
+    """
+    Ensure BatchNorm buffers are in float32 for mixed precision training compatibility.
+    This fixes the "Expected running_mean to have type Float but got BFloat16" error.
+    """
+    for module in model.modules():
+        if isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
+            if hasattr(module, 'running_mean') and module.running_mean is not None:
+                module.running_mean = module.running_mean.float()
+            if hasattr(module, 'running_var') and module.running_var is not None:
+                module.running_var = module.running_var.float()
+    return model
 
 def calculate_teacher_statistics(teacher_logits_img, teacher_logits_text, 
                                 student_logits_img, student_logits_text):
@@ -205,9 +218,17 @@ def carot_loss(args, clip_encoder, classification_head, logger):
         # Create Beta distribution-based moving average teacher
         total_iterations = args.epochs * num_batches
         weight_func = create_beta_weight_function(args.beta, total_iterations)
-        teacher_enc = GeneralMovingAverage(model.cuda(), weight_func)
+        teacher_model = model.cuda()
+        if args.use_fp16:
+            teacher_model = fix_batchnorm_dtype_for_mixed_precision(teacher_model)
+        teacher_enc = GeneralMovingAverage(teacher_model, weight_func)
     
     model = model.cuda()
+    
+    # Fix BatchNorm dtype for mixed precision training compatibility
+    if args.use_fp16:
+        model = fix_batchnorm_dtype_for_mixed_precision(model)
+        logger.info("Fixed BatchNorm buffer dtypes for mixed precision training")
 
     classification_head = classification_head.cuda()
     devices = list(range(torch.cuda.device_count()))

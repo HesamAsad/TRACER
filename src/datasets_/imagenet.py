@@ -75,17 +75,8 @@ class ImageNet:
         sampler = self.get_train_sampler()
         kwargs = {'shuffle': True} if sampler is None else {}
         
-        # Optimize for large batch CLIP training
-        if self.batch_size >= 512:
-            # For very large batches, use fewer workers but larger prefetch
-            prefetch_factor = 4
-            actual_workers = min(self.num_workers, 3)
-        elif self.batch_size >= 256:
-            prefetch_factor = 3
-            actual_workers = min(self.num_workers, 4)
-        else:
-            prefetch_factor = 2
-            actual_workers = self.num_workers
+        prefetch_factor = 2
+        actual_workers = self.num_workers
         
         self.train_loader = torch.utils.data.DataLoader(
             self.train_dataset,
@@ -115,16 +106,8 @@ class ImageNet:
     def populate_test(self):
         self.test_dataset = self.get_test_dataset()
         
-        # Use similar optimization for test loader
-        if self.batch_size >= 512:
-            prefetch_factor = 4
-            actual_workers = min(self.num_workers, 3)
-        elif self.batch_size >= 256:
-            prefetch_factor = 3
-            actual_workers = min(self.num_workers, 4)
-        else:
-            prefetch_factor = 2
-            actual_workers = self.num_workers
+        prefetch_factor = 2
+        actual_workers = self.num_workers
             
         self.test_loader = torch.utils.data.DataLoader(
             self.test_dataset,

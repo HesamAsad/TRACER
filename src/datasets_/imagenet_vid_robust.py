@@ -57,8 +57,8 @@ class ImageNetVidRobustBase(ImageNet):
         if logits.shape[1] == 30:
             return logits
         if torch.is_tensor(logits):
-            logits = logits.cpu().numpy()
-        logits_projected = np.zeros((logits.shape[0], 30))
+            logits = logits.detach().to(torch.float32).cpu().numpy()
+        logits_projected = np.zeros((logits.shape[0], 30), dtype=np.float32)
         for k, v in self.rev_class_idx_map.items():
             if self.merge_op == 'mean':
                 logits_projected[:, k] = np.mean(logits[:, v], axis=1).squeeze()
@@ -69,8 +69,8 @@ class ImageNetVidRobustBase(ImageNet):
             elif self.merge_op == 'sum':
                 logits_projected[:, k] = np.sum(logits[:, v], axis=1)
             else:
-                raise Exception(f'unsupported merge operation {merge_op} not allowed')
-        return torch.tensor(logits_projected).to(device)
+                raise Exception(f'unsupported merge operation {self.merge_op} not allowed')
+        return torch.tensor(logits_projected, dtype=torch.float32).to(device)
 
     def scatter_weights(self, weights):
         if weights.size(1) == 1000:

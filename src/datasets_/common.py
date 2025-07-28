@@ -138,20 +138,8 @@ class FeatureDataset(Dataset):
 
 
 def get_dataloader(dataset, is_train, args, image_encoder=None):
-    # Determine optimal number of workers for large batch training
     num_workers = getattr(args, 'workers', 4)
-    
-    # For large batch sizes (>256), reduce workers slightly to avoid memory pressure
-    batch_size = getattr(args, 'batch_size', 32)
-    if batch_size >= 512:
-        # For very large batches, use fewer workers but larger prefetch
-        prefetch_factor = 4
-        num_workers = min(num_workers, 3)  # Cap at 3 workers for 512+ batch size
-    elif batch_size >= 256:
-        prefetch_factor = 3
-        num_workers = min(num_workers, 4)
-    else:
-        prefetch_factor = 2
+    prefetch_factor = 2
     
     if image_encoder is not None:
         feature_dataset = FeatureDataset(is_train, image_encoder, dataset, args.device, args.cache_dir)

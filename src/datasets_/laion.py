@@ -20,13 +20,6 @@ from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableD
 from torch.utils.data.distributed import DistributedSampler
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
-import pdb
-
-try:
-    import horovod.torch as hvd
-except ImportError:
-    hvd = None
-
 from open_clip import tokenize
 
 

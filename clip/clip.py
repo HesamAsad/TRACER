@@ -8,7 +8,7 @@ from typing import Union, List
 
 import torch
 from PIL import Image
-from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize, RandomResizedCrop
+from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize, RandomResizedCrop, RandomHorizontalFlip
 from tqdm import tqdm
 
 from clip.model import build_model
@@ -68,6 +68,7 @@ def _transform(n_px: int, is_train: bool):
     if is_train:
         return Compose([
             RandomResizedCrop(n_px, scale=(0.9, 1.0), interpolation=Image.BICUBIC),
+            RandomHorizontalFlip(),
             _convert_to_rgb,
             ToTensor(),
             normalize,
