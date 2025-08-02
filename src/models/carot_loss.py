@@ -1,22 +1,17 @@
 import os
-import copy
 import time
 from tqdm.auto import tqdm
 import wandb
-import pdb
 
 import torch
-# torch.set_default_dtype(torch.bfloat16)  # Removed: causes BatchNorm dtype issues with mixed precision
+# torch.set_default_dtype(torch.bfloat16)  # Removed: causes RN50 BatchNorm dtype issues with mixed precision
 from torch.nn import functional as F
 import pandas as pd
 import clip.clip as clip
 from clip.loss import ClipLoss
 
-from src.args import parse_arguments
-from src.datasets_.common import get_dataloader, maybe_dictionarize
 from src.models.eval import evaluate
-from src.models.modeling import ClassificationHead, CLIPEncoder, ImageClassifier
-from src.models.utils import cosine_lr, cosine_grad_norm_scheduler, apply_layer_freezing, torch_load, LabelSmoothing, get_logits, clip_img_preprocessing, attack_pgd
+from src.models.utils import cosine_lr, cosine_grad_norm_scheduler, apply_layer_freezing
 from src.models.zeroshot import get_zeroshot_classifier
 from src.datasets_.laion import get_data
 from src.models.beta_moving_average import GeneralMovingAverage, create_beta_weight_function
@@ -445,38 +440,13 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                             )
                             
                             # Apply temperature scaling to teacher logits for better distillation
-                            distillation_temperature = getattr(args, 'distillation_temperature', 4.0)
-                            
-                            # Adaptive temperature scaling based on effective temperature
-                            if getattr(args, 'adaptive_temperature', False):
-                                # Get effective temperature from teacher statistics
-                                teacher_eff_temp = (teacher_stats.get('teacher_effective_temperature_img', 4.0) + 
-                                                  teacher_stats.get('teacher_effective_temperature_text', 4.0)) / 2
-                                
-                                # Adaptive formula: use a fraction of the effective temperature
-                                # This ensures we scale down very confident predictions more
-                                adaptive_factor = getattr(args, 'adaptive_temp_factor', 0.5)
-                                target_temp = getattr(args, 'target_temperature', 3.0)
-                                
-                                # Blend between fixed temperature and adaptive temperature
-                                distillation_temperature = (adaptive_factor * teacher_eff_temp + 
-                                                           (1 - adaptive_factor) * target_temp)
-                                
-                                # Clamp to reasonable range
-                                distillation_temperature = max(1.0, min(distillation_temperature, 8.0))
+                            distillation_temperature = getattr(args, 'distillation_temperature', 1.0)
                             
                             logits_per_image_t_scaled = logits_per_image_t / distillation_temperature
                             logits_per_text_t_scaled = logits_per_text_t / distillation_temperature
                             
-                            # Calculate comprehensive teacher statistics (using original logits)
-                            teacher_stats = calculate_teacher_statistics(
-                                logits_per_image_t, logits_per_text_t,
-                                logits_per_image, logits_per_text
-                            )
-                            
                             # Add temperature scaling info to teacher stats
                             teacher_stats['distillation_temperature'] = distillation_temperature
-                            teacher_stats['teacher_effective_temp_vs_distill_temp'] = teacher_stats.get('teacher_effective_temperature_img', 0) / distillation_temperature
                             
                             # Calculate post-temperature scaling statistics
                             post_temp_stats = calculate_teacher_statistics(
@@ -490,17 +460,19 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                                     teacher_stats[f'post_temp_{key}'] = value
                         
                         # Use temperature-scaled logits for distillation loss
-                        dist_loss = -torch.sum(
-                            F.softmax(logits_per_image_t_scaled, dim=1)
-                            * torch.log(F.softmax(logits_per_image, dim=1))
-                            + F.softmax(logits_per_text_t_scaled, dim=1)
-                            * torch.log(F.softmax(logits_per_text, dim=1)),
-                            dim=1
-                        ).mean()
-                        
-                        ft_clip_loss += args.distil_coef * dist_loss
-                        if isinstance(dist_loss, torch.Tensor):
-                            dist_loss_sum += args.distil_coef * dist_loss.item()
+                        # Only apply basic distillation if kd_module is not being used
+                        if kd_module is None:
+                            dist_loss = -torch.sum(
+                                F.softmax(logits_per_image_t_scaled, dim=1)
+                                * F.log_softmax(logits_per_image, dim=1)
+                                + F.softmax(logits_per_text_t_scaled, dim=1)
+                                * F.log_softmax(logits_per_text, dim=1),
+                                dim=1
+                            ).mean()
+                            
+                            ft_clip_loss += args.distil_coef * dist_loss
+                            if isinstance(dist_loss, torch.Tensor):
+                                dist_loss_sum += args.distil_coef * dist_loss.item()
                         
                         # Get current weight for logging
                         current_weight = teacher_enc.weight
@@ -588,7 +560,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                 base_clip_loss -= args.cross_fnorm * fnorm_val
             if args.l_orth_wv:
                 base_clip_loss -= args.l_orth_wv * orth_val
-            if args.distil_coef and isinstance(dist_loss, torch.Tensor):
+            if args.distil_coef and kd_module is None and isinstance(dist_loss, torch.Tensor):
                 base_clip_loss -= args.distil_coef * dist_loss.item()
             clip_loss_sum += base_clip_loss
 
@@ -638,8 +610,8 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                         "Orthogonality Value": orth_val,
                     })
                 
-                # Add distillation loss if applicable
-                if args.distil_coef and isinstance(dist_loss, torch.Tensor):
+                # Add distillation loss if applicable (only for basic distillation)
+                if args.distil_coef and kd_module is None and isinstance(dist_loss, torch.Tensor):
                     # Calculate training progress for beta momentum display
                     total_steps = num_batches * args.epochs
                     progress = step / total_steps
@@ -648,6 +620,15 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                     wandb_log.update({
                         "Distillation Loss": args.distil_coef * dist_loss.item(),
                         "Distillation Raw Loss": dist_loss.item(),
+                        "Beta Momentum": current_weight,
+                        "Training Progress": progress,
+                    })
+                elif args.distil_coef and kd_module is not None:
+                    # For kd_module case, just log beta momentum and progress
+                    total_steps = num_batches * args.epochs
+                    progress = step / total_steps
+                    log_msg += f"\n\tBeta Momentum: {current_weight:.4f} (progress: {progress:.2%})"
+                    wandb_log.update({
                         "Beta Momentum": current_weight,
                         "Training Progress": progress,
                     })
@@ -722,7 +703,8 @@ def carot_loss(args, clip_encoder, classification_head, logger):
             epoch_stats["Avg Orthogonality Loss"] = round(orth_loss_avg, 4)
             logger.info(f"  Avg Orthogonality Loss: {orth_loss_avg:.4f}")
 
-        if args.distil_coef:
+        if args.distil_coef and kd_module is None:
+            # Only log basic distillation loss if kd_module is not used
             dist_loss_avg = dist_loss_sum / num_batches
             epoch_stats["Avg Distillation Loss"] = round(dist_loss_avg, 4)
             logger.info(f"  Avg Distillation Loss: {dist_loss_avg:.4f}")

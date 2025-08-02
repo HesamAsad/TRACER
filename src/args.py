@@ -289,28 +289,6 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--adaptive_temperature",
-        action="store_true",
-        help="Enable adaptive temperature scaling based on teacher's effective temperature.",
-    )
-
-    parser.add_argument(
-        "--adaptive_temp_factor",
-        type=float,
-        default=0.5,
-        help="Factor for blending adaptive temperature with target temperature. "
-             "0.0 = use only target_temperature, 1.0 = use only effective temperature.",
-    )
-
-    parser.add_argument(
-        "--target_temperature",
-        type=float,
-        default=1.0,
-        help="Target temperature for adaptive temperature scaling. "
-             "Used as the baseline temperature to blend with effective temperature.",
-    )
-
-    parser.add_argument(
         "--m_warm_up",
         type=float,
         default=0.2,

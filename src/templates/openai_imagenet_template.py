@@ -82,4 +82,10 @@ openai_imagenet_template = [
     lambda c: f'a photo of a cool {c}.',
     lambda c: f'a photo of a small {c}.',
     lambda c: f'a tattoo of the {c}.',
+    lambda c: f'a photo containing a small {c}.',
+    lambda c: f'a photo containing a vague {c}.',
+    lambda c: f'a photo containing a distant {c}.',
+    lambda c: f'a photo containing a partially visible {c}.',
+    lambda c: f'a photo containing a hidden {c}.',
+    lambda c: f'a photo containing a faint {c}.',
 ]
