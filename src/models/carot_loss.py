@@ -500,7 +500,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                             
                             # Add KD losses to total loss
                             if kd_losses['total_kd_loss'] > 0:
-                                ft_clip_loss += kd_losses['total_kd_loss']
+                                ft_clip_loss += args.distil_coef * kd_losses['total_kd_loss']
                                 
                                 # Update teacher statistics with KD loss info
                                 for loss_name, loss_value in kd_losses.items():
