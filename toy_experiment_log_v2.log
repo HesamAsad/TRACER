@@ -1,0 +1,94 @@
+Pre-trained Model Accuracy (using mean embeddings):
+Train (Image): 97.87%
+Val (Image): 96.51%
+Test (Image): 96.63%
+Train (Text): 100.00%
+Val (Text): 100.00%
+Test (Text): 100.00%
+
+==================================================
+Fine-tuning with different strategies...
+==================================================
+
+Strategy 1: Direct Full Fine-tuning
+Epoch: 100%|██████████████████████████████████████████████████████████████████| 10/10 [01:18<00:00,  7.85s/it]
+
+Strategy 2: L2 Regularization
+Epoch: 100%|██████████████████████████████████████████████████████████████████| 10/10 [01:27<00:00,  8.75s/it]
+
+Strategy 3: Self-distillation (Static Teacher)
+Epoch: 100%|██████████████████████████████████████████████████████████████████| 10/10 [01:16<00:00,  7.67s/it]
+
+Strategy 4: Dynamic Self-distillation (EMA Teacher)
+Epoch:  60%|████████████████████████████████████████▏                          | 6/10 [00:39<00:26,  6.Epoch:  70%|██████████████████████████████████████████████▉                    | 7/10 [00:45<00:19,  6.Epoch: 100%|██████████████████████████████████████████████████████████████████| 10/10 [01:06<00:00,  6.69s/it]
+
+==================================================
+RESULTS SUMMARY
+==================================================
+
+Image Modality Accuracy (%) - Original MNIST:
+Method               Train      Val        Test      
+------------------------------------------------------------
+Pre-trained          97.87      96.51      96.63     
+Direct FT            27.98      28.32      27.84     
+L2 Reg               29.55      29.78      29.45     
+Static Distill       48.84      48.74      47.65     
+Dynamic Distill      48.73      48.52      47.75     
+
+Image Modality Accuracy (%) - Colored MNIST Test (with spurious correlation):
+Method               Test Colored   
+----------------------------------------
+Pre-trained          11.09          
+Direct FT            98.10          
+L2 Reg               98.10          
+Static Distill       98.18          
+Dynamic Distill      98.18          
+
+Text Modality Accuracy (%):
+Method               Train      Val        Test      
+------------------------------------------------------------
+Pre-trained          100.00     100.00     100.00    
+Direct FT            100.00     100.00     100.00    
+L2 Reg               100.00     100.00     100.00    
+Static Distill       100.00     100.00     100.00    
+Dynamic Distill      100.00     100.00     100.00    
+
+==================================================
+ANALYSIS
+==================================================
+
+Direct FT:
+  Original test improvement: -68.79%
+  Colored test improvement: +87.01%
+  Text improvement: +0.00%
+  Spurious correlation gap: +70.26%
+    -> Heavily relies on spurious correlation
+  Image overfitting gap: 0.14%
+  Text overfitting gap: 0.00%
+
+L2 Reg:
+  Original test improvement: -67.18%
+  Colored test improvement: +87.01%
+  Text improvement: +0.00%
+  Spurious correlation gap: +68.65%
+    -> Heavily relies on spurious correlation
+  Image overfitting gap: 0.10%
+  Text overfitting gap: 0.00%
+
+Static Distill:
+  Original test improvement: -48.98%
+  Colored test improvement: +87.09%
+  Text improvement: +0.00%
+  Spurious correlation gap: +50.53%
+    -> Heavily relies on spurious correlation
+  Image overfitting gap: 1.19%
+  Text overfitting gap: 0.00%
+
+Dynamic Distill:
+  Original test improvement: -48.88%
+  Colored test improvement: +87.09%
+  Text improvement: +0.00%
+  Spurious correlation gap: +50.43%
+    -> Heavily relies on spurious correlation
+  Image overfitting gap: 0.98%
+  Text overfitting gap: 0.00%

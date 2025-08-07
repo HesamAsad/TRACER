@@ -1,0 +1,6 @@
+Method,Image_Train_Original,Image_Val_Original,Image_Test_Original,Image_Test_Colored,Text_Train,Text_Val,Text_Test
+Pre-trained,98.11,96.41,96.82,3.03,100.00,100.00,100.00
+Direct FT,47.48,46.86,47.52,97.92,100.00,100.00,100.00
+L2 Reg,51.58,50.84,51.72,97.98,100.00,100.00,100.00
+Static Distill,68.85,67.44,68.00,98.10,100.00,100.00,100.00
+Dynamic Distill,69.17,68.08,68.56,98.08,100.00,100.00,100.00

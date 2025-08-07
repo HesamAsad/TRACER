@@ -1,0 +1,27 @@
+
+=================================================
+RESULTS SUMMARY FOR ICLR PAPER
+=================================================
+
+Table 1: Performance Comparison (%)
+Method              Original MNIST    Colored MNIST    Forgetting Rate
+                    (Test)           (Test)           (Absolute)
+--------------------------------------------------------------------
+Pre-trained           96.8              3.0              0.0
+Direct FT            47.5             97.9             49.3
+L2 Reg               51.7             98.0             45.1
+Static Distill       68.0             98.1             28.8
+Dynamic Distill      68.6             98.1             28.3
+
+
+Key Findings:
+1. Direct fine-tuning causes severe catastrophic forgetting (49.3% drop)
+2. Distillation methods significantly reduce forgetting:
+   - Static Distillation: 28.8% forgetting
+   - Dynamic Distillation: 28.3% forgetting
+3. All fine-tuning methods achieve high performance on spurious correlation task (>97%)
+4. Text modality remains unaffected (100% accuracy maintained)
+
+Trade-off Analysis:
+- Methods with less forgetting on original task maintain similar spurious correlation performance
+- Distillation methods provide the best balance between retaining original knowledge and adapting to new patterns
