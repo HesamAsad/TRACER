@@ -318,7 +318,7 @@ def create_comprehensive_performance_plot(df, save_path='figures/comprehensive_p
     ax1.set_ylabel('Accuracy (%)', fontsize=11, fontweight='500', color='#444444')
     ax1.set_xticks(x)
     ax1.set_xticklabels(methods, rotation=20, ha='right', fontsize=10)
-    ax1.legend(loc='lower right', frameon=False, fontsize=10)
+    ax1.legend(loc='upper right', frameon=False, fontsize=10)
     ax1.grid(True, alpha=0.3, axis='y')
     ax1.set_axisbelow(True)
 
