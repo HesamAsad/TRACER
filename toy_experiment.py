@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, random_split
 from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 import torchvision
 import torchvision.transforms as transforms
 import numpy as np
@@ -21,16 +22,30 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-SD_WEIGHT = 0.1
+SD_WEIGHT = 0.5
 
 # Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-# Configure autocast device type and dtype
+# Configure autocast device type and dtype (safer defaults across hardware)
 autocast_device = 'cuda' if torch.cuda.is_available() else 'cpu'
-autocast_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+if autocast_device == 'cuda':
+    try:
+        bf16_ok = hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported()
+    except Exception:
+        bf16_ok = False
+    autocast_dtype = torch.bfloat16 if bf16_ok else torch.float16
+else:
+    # CPU autocast prefers bfloat16
+    autocast_dtype = torch.bfloat16
 print(f"Using autocast device: {autocast_device}, dtype: {autocast_dtype}")
+
+# Optional matmul precision for speed on Ampere+ GPUs
+try:
+    torch.set_float32_matmul_precision("medium")
+except Exception:
+    pass
 
 # ==================== Data Preparation ====================
 
@@ -65,32 +80,21 @@ class MNISTMultiModal(Dataset):
 
 class ColoredMNISTMultiModal(Dataset):
     """Colored MNIST dataset with spurious correlations between colors and digit classes"""
-    def __init__(self, mnist_dataset, color_shift=0):
+    def __init__(self, mnist_dataset, color_shift=0, spurious_strength=0.995, invert_mapping=False, color_intensity=3.0):
         self.mnist = mnist_dataset
         self.color_shift = color_shift
+        self.spurious_strength = float(spurious_strength)
+        self.invert_mapping = bool(invert_mapping)
+        self.color_intensity = float(color_intensity)
         # Text templates for colored digits
         self.templates = [
-            "a {} digit", 
-            "the {} number", 
-            "{} handwritten digit",
-            "the {} digit",
-            "the {} number written by hand"
+            "the digit {}", 
+            "number {}", 
+            "handwritten {}", 
+            "a {} digit",
+            "the number {} written by hand"
         ]
         self.colors = ['red', 'blue']
-        
-        # Define spurious correlations: digits 0-4 mostly red, digits 5-9 mostly blue
-        self.digit_to_color_prob = {
-            0: {'red': 0.95, 'blue': 0.05},  # 95% red, 5% blue
-            1: {'red': 0.95, 'blue': 0.05},
-            2: {'red': 0.95, 'blue': 0.05},
-            3: {'red': 0.95, 'blue': 0.05},
-            4: {'red': 0.95, 'blue': 0.05},
-            5: {'red': 0.05, 'blue': 0.95},  # 5% red, 95% blue
-            6: {'red': 0.05, 'blue': 0.95},
-            7: {'red': 0.05, 'blue': 0.95},
-            8: {'red': 0.05, 'blue': 0.95},
-            9: {'red': 0.05, 'blue': 0.95}
-        }
         
     def __len__(self):
         return len(self.mnist)
@@ -99,40 +103,53 @@ class ColoredMNISTMultiModal(Dataset):
         image, label = self.mnist[idx]
         
         # Determine color based on spurious correlation
-        color_probs = self.digit_to_color_prob[label]
-        color = random.choices(list(color_probs.keys()), weights=list(color_probs.values()))[0]
+        # Apply a cyclic shift to introduce distribution shift across splits if desired
+        shifted_label = (int(label) + int(self.color_shift)) % 10
+        # Base mapping: digits 0-4 -> red, 5-9 -> blue
+        base_color = 'red' if shifted_label < 5 else 'blue'
+        if self.invert_mapping:
+            base_color = 'blue' if base_color == 'red' else 'red'
+        # With high probability, use base color; otherwise flip to opposite color
+        if random.random() < self.spurious_strength:
+            color = base_color
+        else:
+            color = 'blue' if base_color == 'red' else 'red'
         
         # Apply color transformation to the image
         colored_image = self.apply_color(image, color)
         
         # Generate text description with color
         template = random.choice(self.templates)
-        text = template.format(color)
+        text = template.format(label)
         
         # Convert text to token indices
         text_tokens = self.text_to_tokens(text, max_len=32)
         return colored_image, text_tokens, label
     
     def apply_color(self, image, color):
-        """Apply color transformation to grayscale image"""
-        # Convert grayscale to RGB and apply color tint
-        if image.shape[0] == 1:  # Grayscale
-            # Create RGB image
-            rgb_image = image.repeat(3, 1, 1)
-            
-            # Apply color tint based on specified color
-            if color == 'red':
-                rgb_image[0] = image.squeeze() * 0.8  # Red channel
-                rgb_image[1] = image.squeeze() * 0.2  # Green channel
-                rgb_image[2] = image.squeeze() * 0.2  # Blue channel
-            elif color == 'blue':
-                rgb_image[0] = image.squeeze() * 0.2  # Red channel
-                rgb_image[1] = image.squeeze() * 0.2  # Green channel
-                rgb_image[2] = image.squeeze() * 0.8  # Blue channel
-            
-            return rgb_image
-        else:
+        """Apply strong color transformation to RGB image in unnormalized space, then re-normalize."""
+        if image.shape[0] != 3:
             return image
+
+        # Unnormalize to [0, 1]
+        mean = torch.tensor([0.1307, 0.1307, 0.1307], dtype=image.dtype, device=image.device).view(3, 1, 1)
+        std = torch.tensor([0.3081, 0.3081, 0.3081], dtype=image.dtype, device=image.device).view(3, 1, 1)
+        img_unnorm = torch.clamp(image * std + mean, 0.0, 1.0)
+
+        # Stronger tint via multiplicative scaling
+        boost = max(self.color_intensity, 1.0)
+        reduce = max(0.05, min(1.0 / boost, 0.5))
+        if color == 'red':
+            multipliers = torch.tensor([boost, reduce, reduce], dtype=img_unnorm.dtype, device=img_unnorm.device).view(3, 1, 1)
+        elif color == 'blue':
+            multipliers = torch.tensor([reduce, reduce, boost], dtype=img_unnorm.dtype, device=img_unnorm.device).view(3, 1, 1)
+        else:
+            multipliers = torch.ones(3, 1, 1, dtype=img_unnorm.dtype, device=img_unnorm.device)
+
+        colored = torch.clamp(img_unnorm * multipliers, 0.0, 1.0)
+        # Re-normalize
+        colored_norm = (colored - mean) / std
+        return colored_norm
     
     def text_to_tokens(self, text, max_len=32):
         # Use shared tokenization function
@@ -186,6 +203,8 @@ def get_zeroshot_classifier(text_encoder, templates, num_classes=10):
                 # Get embedding with autocast
                 with autocast(device_type=autocast_device, dtype=autocast_dtype):
                     embedding = text_encoder(tokens, return_features=True)
+                # Normalize each template embedding before averaging for stability
+                embedding = F.normalize(embedding, dim=-1)
                 
                 # Ensure embedding is 2D: (batch_size, embed_dim)
                 if embedding.dim() == 1:
@@ -195,6 +214,7 @@ def get_zeroshot_classifier(text_encoder, templates, num_classes=10):
             # Compute mean embedding for this digit
             # Stack along batch dimension and take mean
             mean_embedding = torch.cat(digit_embeddings, dim=0).mean(dim=0)  # Shape: (embed_dim,)
+            mean_embedding = F.normalize(mean_embedding, dim=-1)
             classifier_weights.append(mean_embedding)
     
     return torch.stack(classifier_weights)  # Shape: (num_classes, embed_dim)
@@ -222,9 +242,12 @@ def evaluate_zeroshot_classifier(image_encoder, classifier_weights, data_loader)
             # Get image embeddings with autocast
             with autocast(device_type=autocast_device, dtype=autocast_dtype):
                 image_features = image_encoder(images, return_features=True)
+            # Normalize both features and weights to use cosine similarity
+            image_features = F.normalize(image_features, dim=-1)
+            norm_weights = F.normalize(classifier_weights, dim=-1)
             
             # Compute similarity with classifier weights
-            similarity = torch.matmul(image_features, classifier_weights.T)
+            similarity = torch.matmul(image_features, norm_weights.T)
             
             # Get predictions
             _, predicted = torch.max(similarity, 1)
@@ -247,11 +270,12 @@ transform_rgb = transforms.Compose([
 ])
 
 # Load full dataset
+DATA_ROOT = os.getenv('DATA_ROOT', '../data_hesam')
 full_dataset = torchvision.datasets.MNIST(
-    root='../data_hesam', train=True, download=True, transform=transform_rgb
+    root=DATA_ROOT, train=True, download=True, transform=transform_rgb
 )
 test_dataset = torchvision.datasets.MNIST(
-    root='../data_hesam', train=False, download=True, transform=transform_rgb
+    root=DATA_ROOT, train=False, download=True, transform=transform_rgb
 )
 
 # Split training data into train and validation
@@ -265,20 +289,51 @@ val_mm = MNISTMultiModal(val_dataset)
 test_mm = MNISTMultiModal(test_dataset)
 
 # Create colored MNIST datasets for fine-tuning
-train_colored = ColoredMNISTMultiModal(train_dataset, color_shift=0)
-val_colored = ColoredMNISTMultiModal(val_dataset, color_shift=0)
-test_colored = ColoredMNISTMultiModal(test_dataset, color_shift=0)
+# Allow configurable, harsh distribution shift per split via environment variables
+COLOR_SHIFT_TRAIN = int(os.getenv("COLOR_SHIFT_TRAIN", "0"))
+COLOR_SHIFT_VAL = int(os.getenv("COLOR_SHIFT_VAL", "0"))
+COLOR_SHIFT_TEST = int(os.getenv("COLOR_SHIFT_TEST", "0"))
+SPURIOUS_STRENGTH_TRAIN = float(os.getenv("SPURIOUS_STRENGTH_TRAIN", "0.95"))
+SPURIOUS_STRENGTH_VAL = float(os.getenv("SPURIOUS_STRENGTH_VAL", "0.95"))
+SPURIOUS_STRENGTH_TEST = float(os.getenv("SPURIOUS_STRENGTH_TEST", "0.95"))
+INVERT_VAL = bool(int(os.getenv("INVERT_MAPPING_VAL", "0")))
+INVERT_TEST = bool(int(os.getenv("INVERT_MAPPING_TEST", "0")))
+COLOR_INTENSITY = float(os.getenv("COLOR_INTENSITY", "5.0"))
+
+train_colored = ColoredMNISTMultiModal(
+    train_dataset,
+    color_shift=COLOR_SHIFT_TRAIN,
+    spurious_strength=SPURIOUS_STRENGTH_TRAIN,
+    invert_mapping=False,
+    color_intensity=COLOR_INTENSITY,
+)
+val_colored = ColoredMNISTMultiModal(
+    val_dataset,
+    color_shift=COLOR_SHIFT_VAL,
+    spurious_strength=SPURIOUS_STRENGTH_VAL,
+    invert_mapping=INVERT_VAL,
+    color_intensity=COLOR_INTENSITY,
+)
+test_colored = ColoredMNISTMultiModal(
+    test_dataset,
+    color_shift=COLOR_SHIFT_TEST,
+    spurious_strength=SPURIOUS_STRENGTH_TEST,
+    invert_mapping=INVERT_TEST,
+    color_intensity=COLOR_INTENSITY,
+)
 
 # Create dataloaders
-batch_size = 128
-train_loader = DataLoader(train_mm, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_mm, batch_size=batch_size, shuffle=False)
-test_loader = DataLoader(test_mm, batch_size=batch_size, shuffle=False)
+batch_size = int(os.getenv("BATCH_SIZE", "128"))
+num_workers = int(os.getenv("NUM_WORKERS", str(min(8, max(2, (os.cpu_count() or 4)//2)))))
+pin_memory = bool(torch.cuda.is_available())
+train_loader = DataLoader(train_mm, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
+val_loader = DataLoader(val_mm, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
+test_loader = DataLoader(test_mm, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
 
 # Create colored dataloaders for fine-tuning
-train_colored_loader = DataLoader(train_colored, batch_size=batch_size, shuffle=True)
-val_colored_loader = DataLoader(val_colored, batch_size=batch_size, shuffle=False)
-test_colored_loader = DataLoader(test_colored, batch_size=batch_size, shuffle=False)
+train_colored_loader = DataLoader(train_colored, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
+val_colored_loader = DataLoader(val_colored, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
+test_colored_loader = DataLoader(test_colored, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
 
 # ==================== Model Architectures ====================
 
@@ -453,11 +508,13 @@ class MultiModalContrastiveModel(nn.Module):
 
 # ==================== Loss Functions ====================
 
-def linear_contrastive_loss(image_features, text_features, temperature):
+def contrastive_loss(image_features, text_features, temperature):
     """Linear version of contrastive loss (InfoNCE)"""
     batch_size = image_features.shape[0]
     
     # Compute similarity matrix
+    image_features = F.normalize(image_features, dim=-1)
+    text_features = F.normalize(text_features, dim=-1)
     similarity = torch.matmul(image_features, text_features.T) / temperature
     
     # Labels: diagonal elements are positive pairs
@@ -492,7 +549,7 @@ def pretrain_contrastive(model, train_loader, val_loader, epochs=10, checkpoint_
             # Use autocast for forward pass with bfloat16
             with autocast(device_type=autocast_device, dtype=autocast_dtype):
                 image_features, text_features = model(images, texts)
-                loss = linear_contrastive_loss(image_features, text_features, model.temperature)
+                loss = contrastive_loss(image_features, text_features, model.temperature)
             
             # Direct backward pass (no scaling needed for bfloat16)
             loss.backward()
@@ -513,7 +570,7 @@ def pretrain_contrastive(model, train_loader, val_loader, epochs=10, checkpoint_
                 # Use autocast for validation too
                 with autocast(device_type=autocast_device, dtype=autocast_dtype):
                     image_features, text_features = model(images, texts)
-                    loss = linear_contrastive_loss(image_features, text_features, model.temperature)
+                    loss = contrastive_loss(image_features, text_features, model.temperature)
                 
                 val_loss += loss.item()
         
@@ -569,12 +626,14 @@ def evaluate_with_mean_embeddings(model, data_loader, templates, modality='image
                 # Get image embeddings with autocast
                 with autocast(device_type=autocast_device, dtype=autocast_dtype):
                     image_features = model.image_encoder(images, return_features=True)
+                image_features = F.normalize(image_features, dim=-1)
+                norm_weights = F.normalize(classifier_weights, dim=-1)
                 
                 # Compute similarity with classifier weights
                 # image_features: (batch_size, embed_dim)
                 # classifier_weights: (num_classes, embed_dim)
                 # We need: (batch_size, num_classes)
-                similarity = torch.matmul(image_features, classifier_weights.T)
+                similarity = torch.matmul(image_features, norm_weights.T)
                 
                 # Get predictions
                 _, predicted = torch.max(similarity, 1)
@@ -596,6 +655,7 @@ def evaluate_with_mean_embeddings(model, data_loader, templates, modality='image
                     
                     with autocast(device_type=autocast_device, dtype=autocast_dtype):
                         embedding = model.text_encoder(tokens, return_features=True)
+                    embedding = F.normalize(embedding, dim=-1)
                     
                     all_text_embeddings.append(embedding)
                     all_labels.append(digit)
@@ -609,6 +669,7 @@ def evaluate_with_mean_embeddings(model, data_loader, templates, modality='image
             for digit in range(10):
                 digit_mask = labels == digit
                 mean_embedding = text_embeddings[digit_mask].mean(dim=0)
+                mean_embedding = F.normalize(mean_embedding, dim=-1)
                 classifier_weights.append(mean_embedding)
             classifier_weights = torch.stack(classifier_weights)
             
@@ -619,6 +680,7 @@ def evaluate_with_mean_embeddings(model, data_loader, templates, modality='image
                 # Get text embeddings with autocast
                 with autocast(device_type=autocast_device, dtype=autocast_dtype):
                     text_features = model.text_encoder(texts, return_features=True)
+                text_features = F.normalize(text_features, dim=-1)
                 
                 # Compute similarity with classifier weights
                 # text_features: (batch_size, embed_dim)
@@ -636,19 +698,21 @@ def evaluate_with_mean_embeddings(model, data_loader, templates, modality='image
 # ==================== Fine-tuning Strategies ====================
 
 def finetune_direct(model, train_loader, val_loader, epochs=10, checkpoint_dir="toy_exp_ckpts"):
-    """Strategy 1: Direct full fine-tuning with frozen text encoder"""
+    """Strategy 1: Direct full fine-tuning with frozen text encoder, using contrastive loss"""
     model_ft = deepcopy(model)
     
     # Freeze text encoder
     for param in model_ft.text_encoder.parameters():
         param.requires_grad = False
-    
+    for param in model_ft.image_encoder.parameters():
+        param.requires_grad = True
+
     # Only optimize image encoder
-    optimizer = optim.AdamW(model_ft.image_encoder.parameters(), lr=1e-4, weight_decay=0.1)
-    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.AdamW(model_ft.image_encoder.parameters(), lr=1e-4, weight_decay=0.001)
     
     os.makedirs(checkpoint_dir, exist_ok=True)
-    for epoch in tqdm(range(epochs), desc="Epoch"):
+    pbar = tqdm(range(epochs), desc="Epoch")
+    for epoch in pbar:
         model_ft.train()
         for images, texts, labels in train_loader:
             images, texts, labels = images.to(device), texts.to(device), labels.to(device)
@@ -657,13 +721,14 @@ def finetune_direct(model, train_loader, val_loader, epochs=10, checkpoint_dir="
             
             # Use autocast for forward pass with bfloat16
             with autocast(device_type=autocast_device, dtype=autocast_dtype):
-                image_logits = model_ft.image_encoder(images, return_features=False)
-                # Text encoder is frozen, so we don't compute text logits
-                loss = criterion(image_logits, labels)
+                image_features = model_ft.image_encoder(images, return_features=True)
+                with torch.no_grad():
+                    text_features = model_ft.text_encoder(texts, return_features=True)
+                loss = contrastive_loss(image_features, text_features, model_ft.temperature)
             
-            # Direct backward pass (no scaling needed for bfloat16)
             loss.backward()
             optimizer.step()
+            pbar.set_postfix(loss=loss.item())
             
         # Save checkpoint for each epoch
         torch.save(model_ft.state_dict(), os.path.join(checkpoint_dir, f"direct_ft_epoch{epoch+1}.pth"))
@@ -671,8 +736,8 @@ def finetune_direct(model, train_loader, val_loader, epochs=10, checkpoint_dir="
     torch.save(model_ft.state_dict(), os.path.join(checkpoint_dir, "direct_ft_final.pth"))
     return model_ft
 
-def finetune_l2_regularization(model, train_loader, val_loader, epochs=10, lambda_reg=1e-3, checkpoint_dir="toy_exp_ckpts"):
-    """Strategy 2: Fine-tuning with L2 regularization and frozen text encoder"""
+def finetune_l2_regularization(model, train_loader, val_loader, epochs=10, lambda_reg=1e-2, checkpoint_dir="toy_exp_ckpts"):
+    """Strategy 2: Fine-tuning with L2 regularization and frozen text encoder, using contrastive loss"""
     model_ft = deepcopy(model)
     
     # Freeze text encoder
@@ -682,11 +747,14 @@ def finetune_l2_regularization(model, train_loader, val_loader, epochs=10, lambd
     # Store initial parameters for image encoder only
     initial_params = {name: param.clone() for name, param in model_ft.image_encoder.named_parameters()}
     
-    optimizer = optim.AdamW(model_ft.image_encoder.parameters(), lr=1e-4, weight_decay=0.1)
-    criterion = nn.CrossEntropyLoss()
+    for param in model_ft.image_encoder.parameters():
+        param.requires_grad = True
+    
+    optimizer = optim.AdamW(model_ft.image_encoder.parameters(), lr=1e-4, weight_decay=0.001)
     
     os.makedirs(checkpoint_dir, exist_ok=True)
-    for epoch in tqdm(range(epochs), desc="Epoch"):
+    pbar = tqdm(range(epochs), desc="Epoch")
+    for epoch in pbar:
         model_ft.train()
         for images, texts, labels in train_loader:
             images, texts, labels = images.to(device), texts.to(device), labels.to(device)
@@ -695,21 +763,21 @@ def finetune_l2_regularization(model, train_loader, val_loader, epochs=10, lambd
             
             # Use autocast for forward pass with bfloat16
             with autocast(device_type=autocast_device, dtype=autocast_dtype):
-                image_logits = model_ft.image_encoder(images, return_features=False)
-                
-                # Classification loss
-                cls_loss = criterion(image_logits, labels)
+                image_features = model_ft.image_encoder(images, return_features=True)
+                with torch.no_grad():
+                    text_features = model_ft.text_encoder(texts, return_features=True)
+                contrastive = contrastive_loss(image_features, text_features, model_ft.temperature)
                 
                 # L2 regularization loss (only for image encoder)
                 reg_loss = 0
                 for name, param in model_ft.image_encoder.named_parameters():
                     reg_loss += torch.sum((param - initial_params[name]) ** 2)
                 
-                loss = cls_loss + lambda_reg * reg_loss
+                loss = contrastive + lambda_reg * reg_loss
             
-            # Direct backward pass (no scaling needed for bfloat16)
             loss.backward()
             optimizer.step()
+            pbar.set_postfix(loss=loss.item())
             
         # Save checkpoint for each epoch
         torch.save(model_ft.state_dict(), os.path.join(checkpoint_dir, f"l2reg_ft_epoch{epoch+1}.pth"))
@@ -718,7 +786,7 @@ def finetune_l2_regularization(model, train_loader, val_loader, epochs=10, lambd
     return model_ft
 
 def finetune_self_distillation(model, train_loader, val_loader, epochs=10, temperature=0.1, checkpoint_dir="toy_exp_ckpts"):
-    """Strategy 3: Self-distillation with frozen text encoder"""
+    """Strategy 3: Self-distillation with frozen text encoder, using contrastive loss and KL distillation over probabilities"""
     teacher = deepcopy(model)
     for param in teacher.parameters():
         param.requires_grad = False
@@ -730,11 +798,14 @@ def finetune_self_distillation(model, train_loader, val_loader, epochs=10, tempe
     for param in student.text_encoder.parameters():
         param.requires_grad = False
     
-    optimizer = optim.AdamW(student.image_encoder.parameters(), lr=1e-4, weight_decay=0.1)
-    criterion = nn.CrossEntropyLoss()
+    for param in student.image_encoder.parameters():
+        param.requires_grad = True
+    
+    optimizer = optim.AdamW(student.image_encoder.parameters(), lr=1e-4, weight_decay=0.001)
     
     os.makedirs(checkpoint_dir, exist_ok=True)
-    for epoch in tqdm(range(epochs), desc="Epoch"):
+    pbar = tqdm(range(epochs), desc="Epoch")
+    for epoch in pbar:
         student.train()
         for images, texts, labels in train_loader:
             images, texts, labels = images.to(device), texts.to(device), labels.to(device)
@@ -743,28 +814,32 @@ def finetune_self_distillation(model, train_loader, val_loader, epochs=10, tempe
             
             # Use autocast for forward pass with bfloat16
             with autocast(device_type=autocast_device, dtype=autocast_dtype):
-                # Student predictions (only image encoder)
-                student_img_logits = student.image_encoder(images, return_features=False)
-                
-                # Teacher predictions (no gradient)
+                # Student features
+                student_img_features = student.image_encoder(images, return_features=True)
                 with torch.no_grad():
-                    teacher_img_logits = teacher.image_encoder(images, return_features=False)
+                    student_txt_features = student.text_encoder(texts, return_features=True)
+                contrastive = contrastive_loss(student_img_features, student_txt_features, temperature)
                 
-                # Hard label loss
-                hard_loss = criterion(student_img_logits, labels)
-                
-                # Soft label loss (KL divergence)
-                soft_loss_img = F.kl_div(
-                    F.log_softmax(student_img_logits / temperature, dim=1),
-                    F.softmax(teacher_img_logits / temperature, dim=1),
-                    reduction='batchmean'
-                ) * temperature * temperature
-                
-                loss = hard_loss + SD_WEIGHT * soft_loss_img
+                # Teacher features (no gradient)
+                with torch.no_grad():
+                    teacher_img_features = teacher.image_encoder(images, return_features=True)
+                    # Compute logits for both student and teacher
+                    # Use the text features as "class prototypes"
+                    # (batch, embed_dim) @ (num_classes, embed_dim).T -> (batch, num_classes)
+                    # Here, we use the batch's own text features as the "classes"
+                    # This is a simplification; for real distillation, use a fixed set of class prototypes
+                    teacher_logits = torch.matmul(teacher_img_features, student_txt_features.T)
+                    student_logits = torch.matmul(student_img_features, student_txt_features.T)
+                    # Softmax over classes (dim=1)
+                    teacher_probs = F.softmax(teacher_logits, dim=1)
+                    student_log_probs = F.log_softmax(student_logits, dim=1)
+                # KL divergence (teacher_probs is detached)
+                soft_loss_img = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
+                loss = contrastive + SD_WEIGHT * soft_loss_img
             
-            # Direct backward pass (no scaling needed for bfloat16)
             loss.backward()
             optimizer.step()
+            pbar.set_postfix(loss=loss.item())
             
         # Save checkpoint for each epoch
         torch.save(student.state_dict(), os.path.join(checkpoint_dir, f"selfdistill_ft_epoch{epoch+1}.pth"))
@@ -774,7 +849,7 @@ def finetune_self_distillation(model, train_loader, val_loader, epochs=10, tempe
 
 def finetune_dynamic_self_distillation(model, train_loader, val_loader, epochs=10, 
                                       temperature=0.1, ema_decay=0.99999, checkpoint_dir="toy_exp_ckpts"):
-    """Strategy 4: Dynamic self-distillation with frozen text encoder"""
+    """Strategy 4: Dynamic self-distillation with frozen text encoder, using contrastive loss and KL distillation over probabilities"""
     student = deepcopy(model)
     teacher = deepcopy(model)
     for param in teacher.parameters():
@@ -785,11 +860,14 @@ def finetune_dynamic_self_distillation(model, train_loader, val_loader, epochs=1
     for param in student.text_encoder.parameters():
         param.requires_grad = False
     
-    optimizer = optim.AdamW(student.image_encoder.parameters(), lr=1e-4, weight_decay=0.1)
-    criterion = nn.CrossEntropyLoss()
+    for param in student.image_encoder.parameters():
+        param.requires_grad = True
+    
+    optimizer = optim.AdamW(student.image_encoder.parameters(), lr=1e-4, weight_decay=0.001)
     
     os.makedirs(checkpoint_dir, exist_ok=True)
-    for epoch in tqdm(range(epochs), desc="Epoch"):
+    pbar = tqdm(range(epochs), desc="Epoch")
+    for epoch in pbar:
         student.train()
         for images, texts, labels in train_loader:
             images, texts, labels = images.to(device), texts.to(device), labels.to(device)
@@ -798,28 +876,27 @@ def finetune_dynamic_self_distillation(model, train_loader, val_loader, epochs=1
             
             # Use autocast for forward pass with bfloat16
             with autocast(device_type=autocast_device, dtype=autocast_dtype):
-                # Student predictions (only image encoder)
-                student_img_logits = student.image_encoder(images, return_features=False)
-                
-                # Teacher predictions (no gradient)
+                # Student features
+                student_img_features = student.image_encoder(images, return_features=True)
                 with torch.no_grad():
-                    teacher_img_logits = teacher.image_encoder(images, return_features=False)
+                    student_txt_features = student.text_encoder(texts, return_features=True)
+                contrastive = contrastive_loss(student_img_features, student_txt_features, temperature)
                 
-                # Hard label loss
-                hard_loss = criterion(student_img_logits, labels)
-                
-                # Soft label loss
-                soft_loss_img = F.kl_div(
-                    F.log_softmax(student_img_logits / temperature, dim=1),
-                    F.softmax(teacher_img_logits / temperature, dim=1),
-                    reduction='batchmean'
-                ) * temperature * temperature
-                
-                loss = hard_loss + SD_WEIGHT * soft_loss_img
+                # Teacher features (no gradient)
+                with torch.no_grad():
+                    teacher_img_features = teacher.image_encoder(images, return_features=True)
+                    # Compute logits for both student and teacher
+                    teacher_logits = torch.matmul(teacher_img_features, student_txt_features.T)
+                    student_logits = torch.matmul(student_img_features, student_txt_features.T)
+                    teacher_probs = F.softmax(teacher_logits, dim=1)
+                    student_log_probs = F.log_softmax(student_logits, dim=1)
+                # KL divergence (teacher_probs is detached)
+                soft_loss_img = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
+                loss = contrastive + SD_WEIGHT * soft_loss_img
             
-            # Direct backward pass (no scaling needed for bfloat16)
             loss.backward()
             optimizer.step()
+            pbar.set_postfix(loss=loss.item())
             
             # Update EMA teacher (only image encoder)
             with torch.no_grad():
@@ -874,7 +951,7 @@ if __name__ == "__main__":
         'val_txt': evaluate_with_mean_embeddings(model, val_loader, templates, 'text'),
         'test_txt': evaluate_with_mean_embeddings(model, test_loader, templates, 'text'),
         # Evaluate on colored test set using classification head (to see spurious correlation learning)
-        'test_colored_img': evaluate_classification(model, test_colored_loader, 'image')
+        'test_colored_img': evaluate_with_mean_embeddings(model, test_colored_loader, templates, 'image')
     }
     
 
@@ -895,7 +972,7 @@ if __name__ == "__main__":
         'val_txt': evaluate_with_mean_embeddings(model_direct, val_loader, templates, 'text'),
         'test_txt': evaluate_with_mean_embeddings(model_direct, test_loader, templates, 'text'),
         # Evaluate on colored test set using classification head (to see spurious correlation learning)
-        'test_colored_img': evaluate_classification(model_direct, test_colored_loader, 'image')
+        'test_colored_img': evaluate_with_mean_embeddings(model_direct, test_colored_loader, templates, 'image')
     }
     
     # Strategy 2: L2 regularization
@@ -910,7 +987,7 @@ if __name__ == "__main__":
         'val_txt': evaluate_with_mean_embeddings(model_l2, val_loader, templates, 'text'),
         'test_txt': evaluate_with_mean_embeddings(model_l2, test_loader, templates, 'text'),
         # Evaluate on colored test set using classification head (to see spurious correlation learning)
-        'test_colored_img': evaluate_classification(model_l2, test_colored_loader, 'image')
+        'test_colored_img': evaluate_with_mean_embeddings(model_l2, test_colored_loader, templates, 'image')
     }
     
     # Strategy 3: Self-distillation
@@ -925,7 +1002,7 @@ if __name__ == "__main__":
         'val_txt': evaluate_with_mean_embeddings(model_distill, val_loader, templates, 'text'),
         'test_txt': evaluate_with_mean_embeddings(model_distill, test_loader, templates, 'text'),
         # Evaluate on colored test set using classification head (to see spurious correlation learning)
-        'test_colored_img': evaluate_classification(model_distill, test_colored_loader, 'image')
+        'test_colored_img': evaluate_with_mean_embeddings(model_distill, test_colored_loader, templates, 'image')
     }
     
     # Strategy 4: Dynamic self-distillation
@@ -940,7 +1017,7 @@ if __name__ == "__main__":
         'val_txt': evaluate_with_mean_embeddings(model_dynamic, val_loader, templates, 'text'),
         'test_txt': evaluate_with_mean_embeddings(model_dynamic, test_loader, templates, 'text'),
         # Evaluate on colored test set using classification head (to see spurious correlation learning)
-        'test_colored_img': evaluate_classification(model_dynamic, test_colored_loader, 'image')
+        'test_colored_img': evaluate_with_mean_embeddings(model_dynamic, test_colored_loader, templates, 'image')
     }
     
     # ==================== Results Summary ====================
