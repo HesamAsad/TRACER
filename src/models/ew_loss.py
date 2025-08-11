@@ -16,165 +16,59 @@ from src.models.zeroshot import get_zeroshot_classifier
 from src.datasets_.laion import get_data
 from src.models.beta_moving_average import GeneralMovingAverage, create_beta_weight_function
 from src.models.clip_knowledge_distillation import create_clip_kd_module
+from src.models.carot_loss import calculate_teacher_statistics, fix_batchnorm_dtype_for_mixed_precision
 import src.datasets_ as datasets
 
-
-def fix_batchnorm_dtype_for_mixed_precision(model):
+def compute_eigenvalue_weighted_distillation_loss(W_current, W_initial, X_I, alpha=1.0, lambda_weight=1.0):
     """
-    Ensure BatchNorm buffers are in float32 for mixed precision training compatibility.
-    This fixes the "Expected running_mean to have type Float but got BFloat16" error.
-    """
-    for module in model.modules():
-        if isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
-            if hasattr(module, 'running_mean') and module.running_mean is not None:
-                module.running_mean = module.running_mean.float()
-            if hasattr(module, 'running_var') and module.running_var is not None:
-                module.running_var = module.running_var.float()
-    return model
-
-def calculate_teacher_statistics(teacher_logits_img, teacher_logits_text, 
-                                student_logits_img, student_logits_text):
-    """
-    Calculate comprehensive statistics about teacher model predictions for analysis.
+    Compute Eigenvalue-Weighted Self-Distillation (EW-SD) loss.
     
     Args:
-        teacher_logits_img: Teacher logits for image-to-text matching
-        teacher_logits_text: Teacher logits for text-to-image matching  
-        student_logits_img: Student logits for image-to-text matching
-        student_logits_text: Student logits for text-to-image matching
+        W_current: Current model weights (student)
+        W_initial: Initial/teacher model weights
+        X_I: Finetuning data matrix (batch_size, feature_dim)
+        alpha: Eigenvalue weighting parameter (0=uniform SD, 1=covariance-normalized, 2=maximum adaptation)
+        lambda_weight: Overall regularization strength
     
     Returns:
-        Dictionary containing various teacher statistics
+        EW-SD loss value
     """
-    stats = {}
-    
-    # Convert logits to probabilities
-    teacher_probs_img = F.softmax(teacher_logits_img, dim=1)
-    teacher_probs_text = F.softmax(teacher_logits_text, dim=1)
-    student_probs_img = F.softmax(student_logits_img, dim=1)
-    student_probs_text = F.softmax(student_logits_text, dim=1)
-    
-    # 1. Entropy calculations (measure of uncertainty)
-    def entropy(probs):
-        return -torch.sum(probs * torch.log(probs + 1e-8), dim=1)
-    
-    teacher_entropy_img = entropy(teacher_probs_img)
-    teacher_entropy_text = entropy(teacher_probs_text)
-    
-    stats['teacher_avg_entropy_img'] = teacher_entropy_img.mean().item()
-    stats['teacher_avg_entropy_text'] = teacher_entropy_text.mean().item()
-    stats['teacher_avg_entropy_combined'] = (teacher_entropy_img.mean() + teacher_entropy_text.mean()).item() / 2
-    
-    # 2. Confidence calculations (max probability)
-    teacher_confidence_img = torch.max(teacher_probs_img, dim=1)[0]
-    teacher_confidence_text = torch.max(teacher_probs_text, dim=1)[0]
-    
-    stats['teacher_avg_confidence_img'] = teacher_confidence_img.mean().item()
-    stats['teacher_avg_confidence_text'] = teacher_confidence_text.mean().item()
-    stats['teacher_avg_confidence_combined'] = (teacher_confidence_img.mean() + teacher_confidence_text.mean()).item() / 2
-    
-    # 3. Prediction agreement/disagreement with student
-    teacher_pred_img = torch.argmax(teacher_probs_img, dim=1)
-    teacher_pred_text = torch.argmax(teacher_probs_text, dim=1)
-    student_pred_img = torch.argmax(student_probs_img, dim=1)
-    student_pred_text = torch.argmax(student_probs_text, dim=1)
-    
-    agreement_img = (teacher_pred_img == student_pred_img).float().mean().item()
-    agreement_text = (teacher_pred_text == student_pred_text).float().mean().item()
-    
-    stats['teacher_student_agreement_img'] = agreement_img
-    stats['teacher_student_agreement_text'] = agreement_text
-    stats['teacher_student_agreement_combined'] = (agreement_img + agreement_text) / 2
-    
-    # 4. KL divergence between teacher and student (asymmetric)
-    kl_img = F.kl_div(torch.log(student_probs_img + 1e-8), teacher_probs_img, reduction='batchmean')
-    kl_text = F.kl_div(torch.log(student_probs_text + 1e-8), teacher_probs_text, reduction='batchmean')
-    
-    stats['teacher_student_kl_img'] = kl_img.item()
-    stats['teacher_student_kl_text'] = kl_text.item()
-    stats['teacher_student_kl_combined'] = (kl_img + kl_text).item() / 2
-    
-    # 5. Top-k accuracy alignment
-    def top_k_accuracy_alignment(teacher_logits, student_logits, k=5):
-        teacher_topk = torch.topk(teacher_logits, k, dim=1)[1]
-        student_topk = torch.topk(student_logits, k, dim=1)[1]
-        
-        # Calculate how many of teacher's top-k are in student's top-k
-        overlap = 0
-        for i in range(teacher_topk.size(0)):
-            teacher_set = set(teacher_topk[i].cpu().tolist())
-            student_set = set(student_topk[i].cpu().tolist())
-            overlap += len(teacher_set.intersection(student_set))
-        
-        return overlap / (teacher_topk.size(0) * k)
-    
-    stats['teacher_student_top5_alignment_img'] = top_k_accuracy_alignment(teacher_logits_img, student_logits_img, k=5)
-    stats['teacher_student_top5_alignment_text'] = top_k_accuracy_alignment(teacher_logits_text, student_logits_text, k=5)
-    
-    # 6. Prediction diversity (how spread out are the predictions)
-    def prediction_diversity(probs):
-        # Calculate the effective number of classes (inverse of Gini coefficient)
-        sorted_probs = torch.sort(probs, dim=1, descending=True)[0]
-        cumsum = torch.cumsum(sorted_probs, dim=1)
-        return (1 - torch.sum(sorted_probs * (2 * cumsum - sorted_probs - 1), dim=1)).mean()
-    
-    stats['teacher_prediction_diversity_img'] = prediction_diversity(teacher_probs_img).item()
-    stats['teacher_prediction_diversity_text'] = prediction_diversity(teacher_probs_text).item()
-    
-    # 7. Correctness calculation
-    # For contrastive learning, correct prediction is when image matches its corresponding text (diagonal)
-    batch_size = teacher_logits_img.size(0)
-    correct_indices = torch.arange(batch_size).cuda()
-    
-    teacher_correct_img = (teacher_pred_img == correct_indices).float().mean().item()
-    teacher_correct_text = (teacher_pred_text == correct_indices).float().mean().item()
-    student_correct_img = (student_pred_img == correct_indices).float().mean().item()
-    student_correct_text = (student_pred_text == correct_indices).float().mean().item()
-    
-    stats['teacher_accuracy_img'] = teacher_correct_img
-    stats['teacher_accuracy_text'] = teacher_correct_text
-    stats['teacher_accuracy_combined'] = (teacher_correct_img + teacher_correct_text) / 2
-    
-    stats['student_accuracy_img'] = student_correct_img
-    stats['student_accuracy_text'] = student_correct_text
-    stats['student_accuracy_combined'] = (student_correct_img + student_correct_text) / 2
-    
-    # Teacher vs student accuracy difference
-    stats['teacher_student_accuracy_diff_img'] = teacher_correct_img - student_correct_img
-    stats['teacher_student_accuracy_diff_text'] = teacher_correct_text - student_correct_text
-    stats['teacher_student_accuracy_diff_combined'] = stats['teacher_accuracy_combined'] - stats['student_accuracy_combined']
-    
-    # 8. Ground truth probability analysis (how much probability mass is on the diagonal)
-    teacher_gt_probs_img = torch.diag(teacher_probs_img).mean().item()
-    teacher_gt_probs_text = torch.diag(teacher_probs_text).mean().item()
-    student_gt_probs_img = torch.diag(student_probs_img).mean().item()
-    student_gt_probs_text = torch.diag(student_probs_text).mean().item()
-    
-    stats['teacher_gt_prob_img'] = teacher_gt_probs_img
-    stats['teacher_gt_prob_text'] = teacher_gt_probs_text
-    stats['teacher_gt_prob_combined'] = (teacher_gt_probs_img + teacher_gt_probs_text) / 2
-    
-    stats['student_gt_prob_img'] = student_gt_probs_img
-    stats['student_gt_prob_text'] = student_gt_probs_text
-    stats['student_gt_prob_combined'] = (student_gt_probs_img + student_gt_probs_text) / 2
-    
-    # 9. Temperature analysis (effective temperature of the teacher)
-    def effective_temperature(logits):
-        # Estimate temperature by fitting to make entropy match uniform distribution
-        target_entropy = torch.log(torch.tensor(logits.size(1), dtype=torch.float32))
-        current_entropy = entropy(F.softmax(logits, dim=1)).mean()
-        return (target_entropy / current_entropy).item()
-    
-    stats['teacher_effective_temperature_img'] = effective_temperature(teacher_logits_img)
-    stats['teacher_effective_temperature_text'] = effective_temperature(teacher_logits_text)
-    
-    return stats
+    # Compute difference in embeddings
+    # Supports either callables (modules/functions) or weight matrices
+    if callable(W_current) and callable(W_initial):
+        # Expect callables that map X_I -> embeddings
+        diff_embeddings = W_current(X_I) - W_initial(X_I)
+    else:
+        # Assume tensors representing weight matrices; map X_I accordingly
+        if not (torch.is_tensor(W_current) and torch.is_tensor(W_initial)):
+            raise TypeError("W_current and W_initial must be callables or torch.Tensors")
+        # Compute (W_current - W_initial) @ X_I^T, then transpose to (batch, feature_dim)
+        diff_embeddings = (W_current - W_initial) @ X_I.T
+        diff_embeddings = diff_embeddings.T
 
+    # Compute SVD of feature matrix; use transpose so right singular vectors span feature space
+    # In practice, this can be cached per epoch for efficiency
+    with torch.no_grad():
+        X_I_T = X_I.T  # (feature_dim, batch_size)
+        U, S, V = torch.svd(X_I_T)
+        # Eigenvalue weights with numerical stability
+        eps = 1e-8
+        S_weighted = torch.pow(S + eps, -alpha / 2)
+        S_weighted = S_weighted / S_weighted.mean()
 
-def carot_loss(args, clip_encoder, classification_head, logger):
+    # Project diff onto feature eigenvectors (columns of U) and apply weights
+    diff_projected = diff_embeddings @ U  # (batch_size, feature_dim)
+    diff_weighted = diff_projected * S_weighted.unsqueeze(0)
+
+    # Compute loss (mean over elements)
+    ew_sd_loss = 0.5 * lambda_weight * (diff_weighted ** 2).mean()
+    
+    return ew_sd_loss
+
+def ew_loss(args, clip_encoder, classification_head, logger):
     assert args.train_dataset is not None, "Please provide a training dataset."
 
-    logger.info("Fine-tuning Using carot Loss")
+    logger.info("Fine-tuning Using EW Loss")
     model = clip_encoder
     
     # Apply layer freezing based on arguments
@@ -209,6 +103,12 @@ def carot_loss(args, clip_encoder, classification_head, logger):
     if args.clip_load is not None:
         model = model.load(args.clip_load)
 
+    # Store initial model weights for EW-SD if needed
+    initial_model_state = None
+    if hasattr(args, 'ew_sd_alpha') and args.ew_sd_alpha > 0:
+        initial_model_state = {name: param.clone().detach() for name, param in model.named_parameters()}
+        logger.info(f"Stored initial model weights for EW-SD with alpha={args.ew_sd_alpha}")
+
     if args.distil_coef:
         # Create Beta distribution-based moving average teacher
         total_iterations = args.epochs * num_batches
@@ -238,6 +138,9 @@ def carot_loss(args, clip_encoder, classification_head, logger):
     stats = []
     prev_num_logits = 0
     labels_ = {}
+    
+    # (EW-SD eigendecomposition can be cached per epoch if needed)
+    
     #! inference flag
     if args.epochs == 0:
         epoch = 0
@@ -317,6 +220,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
         orth_loss_sum = 0
         dist_loss_sum = 0
         clip_loss_sum = 0
+        ew_sd_loss_sum = 0  # Track EW-SD loss
         supcon_logged_this_epoch = False  # Track if we've logged supervised contrastive info this epoch
         
         # Initialize KD loss tracking
@@ -406,6 +310,27 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                     ft_clip_loss += args.l_orth_wv * orth_val
                     orth_val = orth_val.item()
                     orth_loss_sum += args.l_orth_wv * orth_val
+                
+                #* Eigenvalue-Weighted Self-Distillation (EW-SD)
+                ew_sd_loss = torch.tensor(0.0, device=ft_image_features.device)
+                if hasattr(args, 'ew_sd_alpha') and args.ew_sd_alpha > 0 and hasattr(args, 'ew_sd_lambda') and args.ew_sd_lambda > 0:
+                    # Select current and initial projection matrices
+                    if args.model[:3] != 'ViT':
+                        current_visual_proj = model.module.model.visual.attnpool.c_proj.weight
+                        initial_visual_proj = initial_model_state['model.visual.attnpool.c_proj.weight']
+                    else:
+                        current_visual_proj = model.module.model.visual.proj
+                        initial_visual_proj = initial_model_state['model.visual.proj']
+
+                    ew_sd_loss = compute_eigenvalue_weighted_distillation_loss(
+                        current_visual_proj,
+                        initial_visual_proj,
+                        ft_image_features,
+                        alpha=args.ew_sd_alpha,
+                        lambda_weight=args.ew_sd_lambda,
+                    )
+                    ft_clip_loss += ew_sd_loss
+                    ew_sd_loss_sum += ew_sd_loss.item()
 
             #! self-distillation flag
             dist_loss, current_weight = torch.tensor(0), 0.0
@@ -566,6 +491,8 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                 base_clip_loss -= args.l_orth_wv * orth_val
             if args.distil_coef and kd_module is None and isinstance(dist_loss, torch.Tensor):
                 base_clip_loss -= args.distil_coef * dist_loss.item()
+            if hasattr(args, 'ew_sd_alpha') and args.ew_sd_alpha > 0 and hasattr(args, 'ew_sd_lambda') and args.ew_sd_lambda > 0:
+                base_clip_loss -= ew_sd_loss.item()
             clip_loss_sum += base_clip_loss
 
             id_carot_loss_sum += ft_clip_loss.item()
@@ -612,6 +539,15 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                     wandb_log.update({
                         "Orthogonality Loss": args.l_orth_wv * orth_val,
                         "Orthogonality Value": orth_val,
+                    })
+                
+                # Add EW-SD loss if applicable
+                if hasattr(args, 'ew_sd_alpha') and args.ew_sd_alpha > 0 and hasattr(args, 'ew_sd_lambda') and args.ew_sd_lambda > 0:
+                    log_msg += f"\n\tEW-SD Loss: {ew_sd_loss.item():.4f} (alpha={args.ew_sd_alpha}, lambda={args.ew_sd_lambda})"
+                    wandb_log.update({
+                        "EW-SD Loss": ew_sd_loss.item(),
+                        "EW-SD Alpha": args.ew_sd_alpha,
+                        "EW-SD Lambda": args.ew_sd_lambda,
                     })
                 
                 # Add distillation loss if applicable (only for basic distillation)
@@ -706,6 +642,11 @@ def carot_loss(args, clip_encoder, classification_head, logger):
             orth_loss_avg = orth_loss_sum / num_batches
             epoch_stats["Avg Orthogonality Loss"] = round(orth_loss_avg, 4)
             logger.info(f"  Avg Orthogonality Loss: {orth_loss_avg:.4f}")
+        
+        if hasattr(args, 'ew_sd_alpha') and args.ew_sd_alpha > 0 and hasattr(args, 'ew_sd_lambda') and args.ew_sd_lambda > 0:
+            ew_sd_loss_avg = ew_sd_loss_sum / num_batches
+            epoch_stats["Avg EW-SD Loss"] = round(ew_sd_loss_avg, 4)
+            logger.info(f"  Avg EW-SD Loss: {ew_sd_loss_avg:.4f} (alpha={args.ew_sd_alpha}, lambda={args.ew_sd_lambda})")
 
         if args.distil_coef and kd_module is None:
             # Only log basic distillation loss if kd_module is not used
@@ -815,6 +756,11 @@ def carot_loss(args, clip_encoder, classification_head, logger):
             + f"_CF{args.cross_fnorm}"
             + f"_run{args.run}"
         )
+        
+        # Add EW-SD to log directory name if used
+        if hasattr(args, 'ew_sd_alpha') and args.ew_sd_alpha > 0:
+            log_dir += f"_EWSD_a{args.ew_sd_alpha}_l{args.ew_sd_lambda}"
+        
         os.makedirs(log_dir, exist_ok=True)
         stats_df.to_csv(log_dir + "/stats.tsv", sep="\t")
 
