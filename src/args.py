@@ -464,19 +464,17 @@ def parse_arguments():
         help="Number of last layers to keep trainable in both encoders. -1 means all layers trainable, 0 means all frozen, N means last N layers trainable",
     )
 
-    # Add these to your parse_arguments function in args.py:
-
     parser.add_argument(
         "--ew_sd_alpha",
         type=float,
-        default=0.0,
+        default=0.5,
         help="Eigenvalue weighting parameter for EW-SD. 0=uniform (standard SD), 1=covariance-normalized, 2=maximum adaptation. Default: 0.0 (disabled)",
     )
 
     parser.add_argument(
         "--ew_sd_lambda",
         type=float,
-        default=0.0,
+        default=0.1,
         help="Overall regularization strength for EW-SD. Default: 0.0 (disabled)",
     )
 

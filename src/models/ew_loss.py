@@ -33,35 +33,32 @@ def compute_eigenvalue_weighted_distillation_loss(W_current, W_initial, X_I, alp
     Returns:
         EW-SD loss value
     """
-    # Compute difference in embeddings
-    # Supports either callables (modules/functions) or weight matrices
-    if callable(W_current) and callable(W_initial):
-        # Expect callables that map X_I -> embeddings
-        diff_embeddings = W_current(X_I) - W_initial(X_I)
-    else:
-        # Assume tensors representing weight matrices; map X_I accordingly
-        if not (torch.is_tensor(W_current) and torch.is_tensor(W_initial)):
-            raise TypeError("W_current and W_initial must be callables or torch.Tensors")
-        # Compute (W_current - W_initial) @ X_I^T, then transpose to (batch, feature_dim)
-        diff_embeddings = (W_current - W_initial) @ X_I.T
-        diff_embeddings = diff_embeddings.T
-
-    # Compute SVD of feature matrix; use transpose so right singular vectors span feature space
-    # In practice, this can be cached per epoch for efficiency
+    # Compute SVD on features X_I (batch_size, feature_dim)
+    # Columns of V span feature space; singular values correspond to feature variance
     with torch.no_grad():
-        X_I_T = X_I.T  # (feature_dim, batch_size)
-        U, S, V = torch.svd(X_I_T)
-        # Eigenvalue weights with numerical stability
+        # torch.svd returns U (batch x batch), S (min), V (feature_dim x feature_dim) for X_I (batch x feature_dim)
+        U_svd, S, V = torch.svd(X_I)
         eps = 1e-8
         S_weighted = torch.pow(S + eps, -alpha / 2)
         S_weighted = S_weighted / S_weighted.mean()
 
-    # Project diff onto feature eigenvectors (columns of U) and apply weights
-    diff_projected = diff_embeddings @ U  # (batch_size, feature_dim)
-    diff_weighted = diff_projected * S_weighted.unsqueeze(0)
+    # Transform inputs into feature eigenbasis and apply eigenvalue weighting
+    # X_proj: (batch_size, feature_dim)
+    X_proj = X_I @ V
+    X_weighted = X_proj * S_weighted.unsqueeze(0)
 
-    # Compute loss (mean over elements)
-    ew_sd_loss = 0.5 * lambda_weight * (diff_weighted ** 2).mean()
+    # Compute difference in embeddings under current vs initial weights
+    if callable(W_current) and callable(W_initial):
+        diff_embeddings = W_current(X_weighted) - W_initial(X_weighted)
+    else:
+        if not (torch.is_tensor(W_current) and torch.is_tensor(W_initial)):
+            raise TypeError("W_current and W_initial must be callables or torch.Tensors")
+        # Linear: y = X @ W^T, so use (W_current - W_initial).T
+        W_diff_T = (W_current - W_initial).T
+        diff_embeddings = X_weighted @ W_diff_T
+
+    # Loss over weighted differences
+    ew_sd_loss = 0.5 * lambda_weight * (diff_embeddings ** 2).mean()
     
     return ew_sd_loss
 
@@ -136,10 +133,6 @@ def ew_loss(args, clip_encoder, classification_head, logger):
     model.train()
 
     stats = []
-    prev_num_logits = 0
-    labels_ = {}
-    
-    # (EW-SD eigendecomposition can be cached per epoch if needed)
     
     #! inference flag
     if args.epochs == 0:
