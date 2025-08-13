@@ -15,8 +15,8 @@ from src.models.utils import cosine_lr, cosine_grad_norm_scheduler, apply_layer_
 from src.models.zeroshot import get_zeroshot_classifier
 from src.datasets_.laion import get_data
 from src.models.beta_moving_average import GeneralMovingAverage, create_beta_weight_function
-from src.models.clip_knowledge_distillation import create_clip_kd_module
-from src.models.carot_loss import calculate_teacher_statistics, fix_batchnorm_dtype_for_mixed_precision
+from src.models.clip_knowledge_distillation import create_clip_kd_module, calculate_teacher_statistics
+from src.models.utils import fix_batchnorm_dtype_for_mixed_precision
 import src.datasets_ as datasets
 
 def compute_eigenvalue_weighted_distillation_loss(W_current, W_initial, X_I, alpha=1.0, lambda_weight=1.0):

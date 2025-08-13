@@ -8,6 +8,20 @@ import glob
 import numpy as np
 
 
+def fix_batchnorm_dtype_for_mixed_precision(model):
+    """
+    Ensure BatchNorm buffers are in float32 for mixed precision training compatibility.
+    This fixes the "Expected running_mean to have type Float but got BFloat16" error.
+    """
+    for module in model.modules():
+        if isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
+            if hasattr(module, 'running_mean') and module.running_mean is not None:
+                module.running_mean = module.running_mean.float()
+            if hasattr(module, 'running_var') and module.running_var is not None:
+                module.running_var = module.running_var.float()
+    return model
+
+
 def find_latest_checkpoint(checkpoint_dir):
     """Find the latest checkpoint in the given directory."""
     if not os.path.exists(checkpoint_dir):

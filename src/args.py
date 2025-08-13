@@ -467,14 +467,14 @@ def parse_arguments():
     parser.add_argument(
         "--ew_sd_alpha",
         type=float,
-        default=0.5,
+        default=0.0,
         help="Eigenvalue weighting parameter for EW-SD. 0=uniform (standard SD), 1=covariance-normalized, 2=maximum adaptation. Default: 0.0 (disabled)",
     )
 
     parser.add_argument(
         "--ew_sd_lambda",
         type=float,
-        default=0.1,
+        default=0.0,
         help="Overall regularization strength for EW-SD. Default: 0.0 (disabled)",
     )
 

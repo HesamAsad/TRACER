@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
 
 class CLIPKnowledgeDistillation(nn.Module):
@@ -360,3 +359,143 @@ def create_clip_kd_module(args, embed_dim=512):
     Since teacher is a moving average of student, they have identical embedding dimensions.
     """
     return CLIPKnowledgeDistillation(args, embed_dim) 
+
+
+def calculate_teacher_statistics(teacher_logits_img, teacher_logits_text, 
+                                student_logits_img, student_logits_text):
+    """
+    Calculate comprehensive statistics about teacher model predictions for analysis.
+    
+    Args:
+        teacher_logits_img: Teacher logits for image-to-text matching
+        teacher_logits_text: Teacher logits for text-to-image matching  
+        student_logits_img: Student logits for image-to-text matching
+        student_logits_text: Student logits for text-to-image matching
+    
+    Returns:
+        Dictionary containing various teacher statistics
+    """
+    stats = {}
+    
+    # Convert logits to probabilities
+    teacher_probs_img = F.softmax(teacher_logits_img, dim=1)
+    teacher_probs_text = F.softmax(teacher_logits_text, dim=1)
+    student_probs_img = F.softmax(student_logits_img, dim=1)
+    student_probs_text = F.softmax(student_logits_text, dim=1)
+    
+    # 1. Entropy calculations (measure of uncertainty)
+    def entropy(probs):
+        return -torch.sum(probs * torch.log(probs + 1e-8), dim=1)
+    
+    teacher_entropy_img = entropy(teacher_probs_img)
+    teacher_entropy_text = entropy(teacher_probs_text)
+    
+    stats['teacher_avg_entropy_img'] = teacher_entropy_img.mean().item()
+    stats['teacher_avg_entropy_text'] = teacher_entropy_text.mean().item()
+    stats['teacher_avg_entropy_combined'] = (teacher_entropy_img.mean() + teacher_entropy_text.mean()).item() / 2
+    
+    # 2. Confidence calculations (max probability)
+    teacher_confidence_img = torch.max(teacher_probs_img, dim=1)[0]
+    teacher_confidence_text = torch.max(teacher_probs_text, dim=1)[0]
+    
+    stats['teacher_avg_confidence_img'] = teacher_confidence_img.mean().item()
+    stats['teacher_avg_confidence_text'] = teacher_confidence_text.mean().item()
+    stats['teacher_avg_confidence_combined'] = (teacher_confidence_img.mean() + teacher_confidence_text.mean()).item() / 2
+    
+    # 3. Prediction agreement/disagreement with student
+    teacher_pred_img = torch.argmax(teacher_probs_img, dim=1)
+    teacher_pred_text = torch.argmax(teacher_probs_text, dim=1)
+    student_pred_img = torch.argmax(student_probs_img, dim=1)
+    student_pred_text = torch.argmax(student_probs_text, dim=1)
+    
+    agreement_img = (teacher_pred_img == student_pred_img).float().mean().item()
+    agreement_text = (teacher_pred_text == student_pred_text).float().mean().item()
+    
+    stats['teacher_student_agreement_img'] = agreement_img
+    stats['teacher_student_agreement_text'] = agreement_text
+    stats['teacher_student_agreement_combined'] = (agreement_img + agreement_text) / 2
+    
+    # 4. KL divergence between teacher and student (asymmetric)
+    kl_img = F.kl_div(torch.log(student_probs_img + 1e-8), teacher_probs_img, reduction='batchmean')
+    kl_text = F.kl_div(torch.log(student_probs_text + 1e-8), teacher_probs_text, reduction='batchmean')
+    
+    stats['teacher_student_kl_img'] = kl_img.item()
+    stats['teacher_student_kl_text'] = kl_text.item()
+    stats['teacher_student_kl_combined'] = (kl_img + kl_text).item() / 2
+    
+    # 5. Top-k accuracy alignment
+    def top_k_accuracy_alignment(teacher_logits, student_logits, k=5):
+        teacher_topk = torch.topk(teacher_logits, k, dim=1)[1]
+        student_topk = torch.topk(student_logits, k, dim=1)[1]
+        
+        # Calculate how many of teacher's top-k are in student's top-k
+        overlap = 0
+        for i in range(teacher_topk.size(0)):
+            teacher_set = set(teacher_topk[i].cpu().tolist())
+            student_set = set(student_topk[i].cpu().tolist())
+            overlap += len(teacher_set.intersection(student_set))
+        
+        return overlap / (teacher_topk.size(0) * k)
+    
+    stats['teacher_student_top5_alignment_img'] = top_k_accuracy_alignment(teacher_logits_img, student_logits_img, k=5)
+    stats['teacher_student_top5_alignment_text'] = top_k_accuracy_alignment(teacher_logits_text, student_logits_text, k=5)
+    
+    # 6. Prediction diversity (how spread out are the predictions)
+    def prediction_diversity(probs):
+        # Calculate the effective number of classes (inverse of Gini coefficient)
+        sorted_probs = torch.sort(probs, dim=1, descending=True)[0]
+        cumsum = torch.cumsum(sorted_probs, dim=1)
+        return (1 - torch.sum(sorted_probs * (2 * cumsum - sorted_probs - 1), dim=1)).mean()
+    
+    stats['teacher_prediction_diversity_img'] = prediction_diversity(teacher_probs_img).item()
+    stats['teacher_prediction_diversity_text'] = prediction_diversity(teacher_probs_text).item()
+    
+    # 7. Correctness calculation
+    # For contrastive learning, correct prediction is when image matches its corresponding text (diagonal)
+    batch_size = teacher_logits_img.size(0)
+    correct_indices = torch.arange(batch_size).cuda()
+    
+    teacher_correct_img = (teacher_pred_img == correct_indices).float().mean().item()
+    teacher_correct_text = (teacher_pred_text == correct_indices).float().mean().item()
+    student_correct_img = (student_pred_img == correct_indices).float().mean().item()
+    student_correct_text = (student_pred_text == correct_indices).float().mean().item()
+    
+    stats['teacher_accuracy_img'] = teacher_correct_img
+    stats['teacher_accuracy_text'] = teacher_correct_text
+    stats['teacher_accuracy_combined'] = (teacher_correct_img + teacher_correct_text) / 2
+    
+    stats['student_accuracy_img'] = student_correct_img
+    stats['student_accuracy_text'] = student_correct_text
+    stats['student_accuracy_combined'] = (student_correct_img + student_correct_text) / 2
+    
+    # Teacher vs student accuracy difference
+    stats['teacher_student_accuracy_diff_img'] = teacher_correct_img - student_correct_img
+    stats['teacher_student_accuracy_diff_text'] = teacher_correct_text - student_correct_text
+    stats['teacher_student_accuracy_diff_combined'] = stats['teacher_accuracy_combined'] - stats['student_accuracy_combined']
+    
+    # 8. Ground truth probability analysis (how much probability mass is on the diagonal)
+    teacher_gt_probs_img = torch.diag(teacher_probs_img).mean().item()
+    teacher_gt_probs_text = torch.diag(teacher_probs_text).mean().item()
+    student_gt_probs_img = torch.diag(student_probs_img).mean().item()
+    student_gt_probs_text = torch.diag(student_probs_text).mean().item()
+    
+    stats['teacher_gt_prob_img'] = teacher_gt_probs_img
+    stats['teacher_gt_prob_text'] = teacher_gt_probs_text
+    stats['teacher_gt_prob_combined'] = (teacher_gt_probs_img + teacher_gt_probs_text) / 2
+    
+    stats['student_gt_prob_img'] = student_gt_probs_img
+    stats['student_gt_prob_text'] = student_gt_probs_text
+    stats['student_gt_prob_combined'] = (student_gt_probs_img + student_gt_probs_text) / 2
+    
+    # 9. Temperature analysis (effective temperature of the teacher)
+    def effective_temperature(logits):
+        # Estimate temperature by fitting to make entropy match uniform distribution
+        target_entropy = torch.log(torch.tensor(logits.size(1), dtype=torch.float32))
+        current_entropy = entropy(F.softmax(logits, dim=1)).mean()
+        return (target_entropy / current_entropy).item()
+    
+    stats['teacher_effective_temperature_img'] = effective_temperature(teacher_logits_img)
+    stats['teacher_effective_temperature_text'] = effective_temperature(teacher_logits_text)
+    
+    return stats
+
