@@ -12,15 +12,15 @@ method=carot
 fp16=1
 ema_up_freq=0
 
-for sd in 0.9
+for sd in 0.1 0.2 0.3 0.4 0.5 0.7 1.0 1.2 1.5 2.0 3.0 4.0 5.0 10.0
 do
-  for alpha_fd in 0.0 2000.0
+  for alpha_fd in 2000.0
   do
-    for alpha_cross_kd in 0.0 1.0
+    for alpha_cross_kd in 1.0
     do
-      for alpha_icl in 0.0 1.0
+      for alpha_icl in 1.0
       do
-        for alpha_crd in 0.0 1.0
+        for alpha_crd in 1.0
         do
           python src/main.py \
             --train-dataset ImageNet --epochs 10 --lr ${lr} --wd ${wd} --batch-size ${bs} \

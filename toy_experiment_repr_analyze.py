@@ -8,6 +8,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib import font_manager as _fm
+from matplotlib.patches import Patch
+from matplotlib.legend_handler import HandlerTuple
+from matplotlib import colors as mcolors
 from pathlib import Path
 import argparse
 
@@ -120,6 +123,19 @@ def set_color_scheme(scheme: str = 'default') -> None:
             REF_COLORS['orange'],
             REF_COLORS['grey'],
         ]
+
+def lighten_color(color_hex: str, amount: float = 0.55) -> str:
+    """Return a lighter shade of the given hex color by mixing with white.
+    amount in [0,1]; higher = lighter.
+    """
+    try:
+        r, g, b = mcolors.to_rgb(color_hex)
+    except Exception:
+        return color_hex
+    r = 1 - (1 - r) * (1 - amount)
+    g = 1 - (1 - g) * (1 - amount)
+    b = 1 - (1 - b) * (1 - amount)
+    return mcolors.to_hex((r, g, b))
 
 def load_data(csv_path):
     """Load experimental results from CSV file."""
@@ -345,46 +361,52 @@ def create_spurious_correlation_analysis(forgetting_df, save_path='figures/spuri
     return fig
 
 def create_comprehensive_performance_plot(df, save_path='figures/comprehensive_performance.pdf', methods_to_plot=None):
-    """Create a comprehensive multi-panel performance comparison."""
+    """Create a comprehensive multi-panel performance comparison.
+    Panels:
+      (a) Combined bar plot: Original vs Fine-tuning test accuracies (paired bars per method)
+      (b) Forgetting analysis (horizontal bars)
+      (c) Performance trade-off scatter
+    """
     # Filter methods
     if methods_to_plot is not None:
         df = df[df['Method'].isin(['Pre-trained'] + methods_to_plot)]
     
-    # 1x4 layout as requested (tuned height)
-    fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(16.0, 5.0))
+    # 1x3 layout (tuned height)
+    fig, (ax1, ax3, ax4) = plt.subplots(1, 3, figsize=(14.0, 5.0))
     methods = df['Method'].tolist()
 
-    # Panel 1: Original MNIST performance comparison (Test only)
-    method_colors = [PALETTE[i % len(PALETTE)] for i in range(len(methods))]
-    bars1 = ax1.bar(methods, df['Image_Test_Original'], color=method_colors, alpha=0.95,
-                    edgecolor='white', linewidth=0.8)
-    ax1.set_title('Original task (MNIST)', y=1.02, fontsize=12)
+    # Panel 1: Combined Original (test) vs Fine-tuning (colored test)
+    x = np.arange(len(methods))
+    width = 0.35
+    base_colors = [PALETTE[i % len(PALETTE)] for i in range(len(methods))]
+    fine_colors = [lighten_color(c, 0.6) for c in base_colors]
+    bars1 = ax1.bar(x - width/2, df['Image_Test_Original'], width,
+                    color=base_colors, edgecolor='white', linewidth=0.8, label='Pre-training (MNIST)')
+    bars2 = ax1.bar(x + width/2, df['Image_Test_Colored'], width,
+                    color=fine_colors, edgecolor='white', linewidth=0.8, label='Fine-tuning (C-MNIST)')
+    ax1.set_title('Pre-training Task vs Fine-tuning Task Accuracy', y=1.02, fontsize=10)
     ax1.set_ylabel('Accuracy (%)')
-    ax1.tick_params(axis='x', rotation=25)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(methods, rotation=25)
+    # Build multicolor legend entries: full colors for Pre-training, light colors for Fine-tuning
+    pre_handles = tuple(Patch(facecolor=c, edgecolor='none') for c in base_colors)
+    fin_handles = tuple(Patch(facecolor=c, edgecolor='none') for c in fine_colors)
+    legend_handles = [pre_handles, fin_handles]
+    legend_labels = ['Pre-training (MNIST)', 'Fine-tuning (C-MNIST)']
+    ax1.legend(legend_handles, legend_labels,
+               handler_map={tuple: HandlerTuple(ndivide=len(base_colors), pad=0.0)},
+               loc='lower left', bbox_to_anchor=(0.5, 0.05), frameon=True,
+               fontsize=8, framealpha=0.75, borderaxespad=0.0,
+               handlelength=len(base_colors)*0.35, handletextpad=0.4, labelspacing=0.3)
     ax1.grid(False)
     ax1.set_axisbelow(True)
-    # Value labels on top
+    # Value labels
     for bar, v in zip(bars1, df['Image_Test_Original']):
         ax1.text(bar.get_x() + bar.get_width()/2, v + 0.5, f'{v:.1f}',
-                 ha='center', va='bottom', fontsize=10, color='#444444', fontweight='500')
-    # Panel labels added at the figure level below (to avoid overlap)
-
-    # Panel 2: Spurious correlation performance
-    method_colors = [PALETTE[i % len(PALETTE)] for i in range(len(methods))]
-    bars2 = ax2.bar(methods, df['Image_Test_Colored'], color=method_colors, alpha=0.9,
-                    edgecolor='white', linewidth=0.8)
-    ax2.set_title('Fine-tuning task (Colored MNIST)', y=1.02, fontsize=12)
-    ax2.set_ylabel('Accuracy (%)')
-    ax2.tick_params(axis='x', rotation=25)
-    ax2.grid(False)
-    ax2.set_axisbelow(True)
-
-    # Add value labels for panel 2
-    for i, (bar, v) in enumerate(zip(bars2, df['Image_Test_Colored'])):
-        ax2.text(bar.get_x() + bar.get_width()/2, v + 0.5,
-                f'{v:.1f}', ha='center', va='bottom', 
-                fontsize=10, color='#444444', fontweight='500')
-    # Panel labels added at the figure level below (to avoid overlap)
+                 ha='center', va='bottom', fontsize=6, color='#444444', fontweight='500')
+    for bar, v in zip(bars2, df['Image_Test_Colored']):
+        ax1.text(bar.get_x() + bar.get_width()/2, v + 0.5, f'{v:.1f}',
+                 ha='center', va='bottom', fontsize=6, color='#444444', fontweight='500')
 
     # Panel 3: Forgetting analysis
     forgetting_methods = [m for m in methods if m != 'Pre-trained']
@@ -455,10 +477,10 @@ def create_comprehensive_performance_plot(df, save_path='figures/comprehensive_p
     # Panel labels added at the figure level below (to avoid overlap)
     # Overall styling
     plt.suptitle('')
-    # Add extra bottom margin for panel labels
+    # Add extra bottom margin for panel labels and a little extra right margin
     plt.tight_layout(rect=[0, 0.26, 1, 1])
     # Figure-level panel labels placed just below each axes to avoid overlaps
-    for i, ax in enumerate([ax1, ax2, ax3, ax4]):
+    for i, ax in enumerate([ax1, ax3, ax4]):
         pos = ax.get_position()
         x_center = (pos.x0 + pos.x1) / 2
         y_pos = pos.y0 - 0.15

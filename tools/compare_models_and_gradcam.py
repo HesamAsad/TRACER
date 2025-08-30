@@ -7,6 +7,7 @@ from typing import Tuple, List, Dict
 import torch
 import torch.nn.functional as F
 import numpy as np
+import csv
 from PIL import Image
 from tqdm import tqdm
 
@@ -336,11 +337,21 @@ def main():
 
     # Visualization loop
     print('Running Grad-CAM visualizations...')
+    # Prepare CSV for class scores
+    csv_path = os.path.join(args_local.out_dir, 'scores.csv')
+    csv_file = open(csv_path, 'w', newline='')
+    csv_writer = csv.writer(csv_file)
+    num_classes = len(dataset.classnames)
+    header = ['global_index', 'image_path', 'gt', 'pred_zs', 'pred_ft'] \
+        + [f'zs_prob_{i}' for i in range(num_classes)] \
+        + [f'ft_prob_{i}' for i in range(num_classes)]
+    csv_writer.writerow(header)
     saved = 0
     for i, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
         batch = maybe_dictionarize(batch)
         images = batch['images']
         labels = batch['labels']  # keep on CPU for labeling
+        image_paths = batch['image_paths'] if 'image_paths' in batch else [''] * len(labels)
         images_cpu = images.detach().cpu()
         batch_size = images_cpu.shape[0]
 
@@ -357,6 +368,7 @@ def main():
             with torch.amp.autocast('cuda', dtype=torch.bfloat16 if args_local.use_fp16 else torch.float32):
                 logits_zs = get_logits(imgs_chunk, zs_enc, zs_head_for_zs)
             pred_zs = logits_zs.argmax(dim=1)
+            probs_zs = F.softmax(logits_zs.float(), dim=1).detach().cpu().numpy()
             cams_zs = zs_cam.compute_cam(imgs_chunk, logits_zs, pred_zs)
             pred_zs_cpu = pred_zs.detach().cpu().tolist()
             zs_enc.zero_grad(set_to_none=True)
@@ -368,6 +380,7 @@ def main():
             with torch.amp.autocast('cuda', dtype=torch.bfloat16 if args_local.use_fp16 else torch.float32):
                 logits_ft = get_logits(imgs_chunk, ft_enc, zs_head_for_ft)
             pred_ft = logits_ft.argmax(dim=1)
+            probs_ft = F.softmax(logits_ft.float(), dim=1).detach().cpu().numpy()
             cams_ft = ft_cam.compute_cam(imgs_chunk, logits_ft, pred_ft)
             pred_ft_cpu = pred_ft.detach().cpu().tolist()
             ft_enc.zero_grad(set_to_none=True)
@@ -390,12 +403,19 @@ def main():
                 canvas.paste(over_ft, (img_pil.width * 2, 0))
                 canvas.save(os.path.join(args_local.out_dir, fname))
 
+                # write CSV row with probabilities
+                global_index = i * args_local.batch_size + k
+                path_str = image_paths[k] if image_paths else ''
+                row = [global_index, path_str, int(labels[k]), zs_cls, ft_cls] \
+                    + probs_zs[idx_local].tolist() + probs_ft[idx_local].tolist()
+                csv_writer.writerow(row)
+
                 saved += 1
                 if saved >= args_local.viz_samples:
                     break
 
             # free per-chunk CPU arrays
-            del cams_zs, cams_ft, imgs_chunk_cpu
+            del cams_zs, cams_ft, imgs_chunk_cpu, probs_zs, probs_ft
             torch.cuda.empty_cache()
             j = j_end
 
@@ -405,6 +425,9 @@ def main():
     # Clean up CAM hooks before metrics to avoid interfering with no_grad paths
     zs_cam.remove_hooks()
     ft_cam.remove_hooks()
+
+    # Close CSV writer before metrics
+    csv_file.close()
 
     # Metrics: alignment & uniformity
     print('Computing alignment and uniformity metrics (zero-shot vs finetuned encoders)...')
