@@ -10,17 +10,17 @@ bs=512
 ts=0.0
 method=carot
 fp16=1
-ema_up_freq=0
+ema_up_freq=1
 
 for sd in 0.9
 do
-  for alpha_fd in 0.0 2000.0
+  for alpha_crd in 1.0
   do
-    for alpha_cross_kd in 0.0 1.0
+    for alpha_cross_kd in 1.0
     do
-      for alpha_icl in 0.0 1.0
+      for alpha_icl in 1.0
       do
-        for alpha_crd in 0.0 1.0
+        for alpha_fd in 2000.0
         do
           python src/main.py \
             --train-dataset ImageNet --epochs 10 --lr ${lr} --wd ${wd} --batch-size ${bs} \
@@ -28,8 +28,9 @@ do
             --template openai_imagenet_template --save ./checkpoints/ \
             --data-location ./datasets/data/ --ft_data ./datasets/csv/imagenet.csv \
             --csv-img-key filepath --csv-caption-key title --exp_name ImageNet/${method} --cross_fnorm 0.05 \
-            --distil_coef ${sd} --l_orth_wv 0 --max_grad_norm 0 --grad_norm_multiplier 0 --warmup_length 500 \
-            --wb_project clip_finetune --method ${method} --use_fp16 ${fp16} --run 1 --ema_up_freq ${ema_up_freq} \
+            --distil_coef ${sd} --l_orth_wv 0.2 --max_grad_norm 0 --grad_norm_multiplier 0 --warmup_length 500 \
+            --wb_project clip_finetune --method ${method} --use_fp16 ${fp16} --run 10 --ema_teacher \
+            --ema_up_freq ${ema_up_freq} --m_sche_src 0.05 --m_sche_tar 0.9 --m_warm_up 0.2 \
             --alpha_fd ${alpha_fd} --alpha_cross_kd ${alpha_cross_kd} --alpha_icl ${alpha_icl} --alpha_crd ${alpha_crd} --workers 32
         done
       done

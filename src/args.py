@@ -303,6 +303,16 @@ def parse_arguments():
     )
     
     parser.add_argument(
+        "--ema_teacher",
+        action="store_true",
+        default=False,
+        help=(
+            "Use Exponential Moving Average (EMA) teacher instead of Beta Moving Average. "
+            "Defaults: ema_up_freq=500, m_sche_tar=0.9, linear warmup from m_sche_src by 0.05 over first 20% iterations."
+        ),
+    )
+    
+    parser.add_argument(
         "--cross_fnorm",
         type=float,
         default=0.0,

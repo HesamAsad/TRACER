@@ -14,7 +14,12 @@ from src.models.eval import evaluate
 from src.models.utils import cosine_lr, cosine_grad_norm_scheduler, apply_layer_freezing, fix_batchnorm_dtype_for_mixed_precision
 from src.models.zeroshot import get_zeroshot_classifier
 from src.datasets_.laion import get_data
-from src.models.beta_moving_average import GeneralMovingAverage, create_beta_weight_function
+from src.models.beta_moving_average import (
+    GeneralMovingAverage,
+    create_beta_weight_function,
+    ExponentialMovingAverage,
+    create_linear_warmup_ema_momentum,
+)
 from src.models.clip_knowledge_distillation import create_clip_kd_module, calculate_teacher_statistics
 import src.datasets_ as datasets
 
@@ -58,13 +63,31 @@ def carot_loss(args, clip_encoder, classification_head, logger):
         model = model.load(args.clip_load)
 
     if args.distil_coef:
-        # Create Beta distribution-based moving average teacher
+        # Create teacher encoder: EMA (if enabled) or Beta-MA (default)
         total_iterations = args.epochs * num_batches
-        weight_func = create_beta_weight_function(args.beta, total_iterations)
         teacher_model = model.cuda()
         if args.use_fp16:
             teacher_model = fix_batchnorm_dtype_for_mixed_precision(teacher_model)
-        teacher_enc = GeneralMovingAverage(teacher_model, weight_func)
+
+        if getattr(args, 'ema_teacher', False):
+            # EMA with linear warmup momentum schedule
+            get_momentum_fn = create_linear_warmup_ema_momentum(
+                src_momentum=args.m_sche_src,
+                tar_momentum=args.m_sche_tar,
+                warmup_ratio=args.m_warm_up,
+                total_iterations=total_iterations,
+            )
+            # Default EMA update frequency to 500 if not provided (>0 keeps user's value)
+            ema_up_freq = args.ema_up_freq if args.ema_up_freq > 0 else 500
+            teacher_enc = ExponentialMovingAverage(
+                teacher_model, get_momentum_fn, update_frequency=ema_up_freq
+            )
+        else:
+            weight_func = create_beta_weight_function(args.beta, total_iterations)
+            teacher_enc = GeneralMovingAverage(teacher_model, weight_func)
+
+        # Effective update frequency used later for gating teacher updates
+        ema_up_freq = args.ema_up_freq if not getattr(args, 'ema_teacher', False) else (args.ema_up_freq if args.ema_up_freq > 0 else 500)
     
     model = model.cuda()
     
@@ -326,8 +349,8 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                             if isinstance(dist_loss, torch.Tensor):
                                 dist_loss_sum += args.distil_coef * dist_loss.item()
                         
-                        # Get current weight for logging
-                        current_weight = teacher_enc.weight
+                        # Get current momentum/weight for logging
+                        current_weight = getattr(teacher_enc, 'weight', getattr(teacher_enc, 'momentum', 0.0))
                         
                         # Apply comprehensive knowledge distillation methods
                         if kd_module is not None:
@@ -398,13 +421,19 @@ def carot_loss(args, clip_encoder, classification_head, logger):
 
             #! self-distillation
             if args.distil_coef:
-                if args.ema_up_freq <= 0:
-                    # Update teacher every step
-                    teacher_enc.update()
+                total_steps = num_batches * args.epochs
+                if getattr(args, 'ema_teacher', False):
+                    # Deprecated logic parity: do NOT update if freq <= 0, else update at multiples; use global_step for schedule
+                    teacher_update_freq = args.ema_up_freq if args.ema_up_freq > 0 else 500
+                    if teacher_update_freq > 0 and (((step % teacher_update_freq) == 0) or (step == total_steps)):
+                        teacher_enc.update(global_step=step)
                 else:
-                    # Update teacher at specified frequency
-                    if ((step % args.ema_up_freq) == 0) or (step == num_batches * args.epochs - 1):
+                    # BMA behavior: if freq <= 0, update every step; else multiples
+                    if args.ema_up_freq <= 0:
                         teacher_enc.update()
+                    else:
+                        if ((step % args.ema_up_freq) == 0) or (step == total_steps - 1):
+                            teacher_enc.update()
 
             # Track base CLIP loss
             base_clip_loss = ft_clip_loss.item()
@@ -468,20 +497,22 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                     total_steps = num_batches * args.epochs
                     progress = step / total_steps
                     log_msg += f"\n\tDistillation Loss: {args.distil_coef * dist_loss.item():.4f} (Raw: {dist_loss.item():.4f})"
-                    log_msg += f"\n\tBeta Momentum: {current_weight:.4f} (progress: {progress:.2%})"
+                    momentum_label = "EMA Momentum" if getattr(args, 'ema_teacher', False) else "Beta Momentum"
+                    log_msg += f"\n\t{momentum_label}: {current_weight:.4f} (progress: {progress:.2%})"
                     wandb_log.update({
                         "Distillation Loss": args.distil_coef * dist_loss.item(),
                         "Distillation Raw Loss": dist_loss.item(),
-                        "Beta Momentum": current_weight,
+                        (momentum_label): current_weight,
                         "Training Progress": progress,
                     })
                 elif args.distil_coef and kd_module is not None:
                     # For kd_module case, just log beta momentum and progress
                     total_steps = num_batches * args.epochs
                     progress = step / total_steps
-                    log_msg += f"\n\tBeta Momentum: {current_weight:.4f} (progress: {progress:.2%})"
+                    momentum_label = "EMA Momentum" if getattr(args, 'ema_teacher', False) else "Beta Momentum"
+                    log_msg += f"\n\t{momentum_label}: {current_weight:.4f} (progress: {progress:.2%})"
                     wandb_log.update({
-                        "Beta Momentum": current_weight,
+                        (momentum_label): current_weight,
                         "Training Progress": progress,
                     })
                     
