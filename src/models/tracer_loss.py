@@ -24,10 +24,10 @@ from src.models.clip_knowledge_distillation import create_clip_kd_module, calcul
 import src.datasets_ as datasets
 
 
-def carot_loss(args, clip_encoder, classification_head, logger):
+def tracer_loss(args, clip_encoder, classification_head, logger):
     assert args.train_dataset is not None, "Please provide a training dataset."
 
-    logger.info("Fine-tuning Using carot Loss")
+    logger.info("Fine-tuning Using Tracer Loss")
     model = clip_encoder
     
     # Apply layer freezing based on arguments
@@ -183,7 +183,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
         epoch_stats = {}
         epoch_stats["epoch"] = epoch
         # Initialize tracking variables for epoch statistics
-        id_carot_loss_sum = 0
+        id_tracer_loss_sum = 0
         fnorm_loss_sum = 0
         orth_loss_sum = 0
         dist_loss_sum = 0
@@ -445,7 +445,7 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                 base_clip_loss -= args.distil_coef * dist_loss.item()
             clip_loss_sum += base_clip_loss
 
-            id_carot_loss_sum += ft_clip_loss.item()
+            id_tracer_loss_sum += ft_clip_loss.item()
 
             if i % print_every == 0:
                 percent_complete = 100 * i / num_batches
@@ -565,15 +565,15 @@ def carot_loss(args, clip_encoder, classification_head, logger):
                 wandb.log(wandb_log)
 
         # Compute averages at the end of each epoch
-        id_carot_loss_avg = id_carot_loss_sum / num_batches
+        id_tracer_loss_avg = id_tracer_loss_sum / num_batches
         clip_loss_avg = clip_loss_sum / num_batches
 
         # Update epoch stats with all metrics
-        epoch_stats["Avg Total Loss"] = round(id_carot_loss_avg, 4)
+        epoch_stats["Avg Total Loss"] = round(id_tracer_loss_avg, 4)
         epoch_stats["Avg CLIP Loss"] = round(clip_loss_avg, 4)
 
         logger.info(f"Epoch {epoch} Summary:")
-        logger.info(f"  Avg Total Loss: {id_carot_loss_avg:.4f}")
+        logger.info(f"  Avg Total Loss: {id_tracer_loss_avg:.4f}")
         logger.info(f"  Avg CLIP Loss: {clip_loss_avg:.4f}")
 
         if args.cross_fnorm:

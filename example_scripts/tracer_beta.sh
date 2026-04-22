@@ -8,7 +8,7 @@ lr=1e-5
 wd=0.1
 bs=512
 ts=0.0
-method=carot
+method=tracer
 fp16=1
 ema_up_freq=0
 

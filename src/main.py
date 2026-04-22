@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from src.models.eval import evaluate
 from src.models.ft_loss import finetune
-from src.models.carot_loss import carot_loss
+from src.models.tracer_loss import tracer_loss
 from src.models.ew_loss import ew_loss
 from src.models.ce_ablation import ce_ablation
 from src.models.modeling import ClassificationHead, CLIPEncoder, ImageClassifier
@@ -99,7 +99,7 @@ def main(args):
         finetuned_checkpoint = ew_loss(args, clip_encoder,
                                                classification_head, logger)
     else:
-        finetuned_checkpoint = carot_loss(args, clip_encoder,
+        finetuned_checkpoint = tracer_loss(args, clip_encoder,
                                             classification_head, logger)
 
 if __name__ == "__main__":
