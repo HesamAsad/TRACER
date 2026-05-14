@@ -31,10 +31,6 @@ def set_seed(SEED):
 
 def main(args):
     set_seed(args.run)
-    if args.wb_project:
-        wandb_args = {"project": args.wb_project}
-        wandb_args["name"] = args.method if args.method else None
-        wandb.init(**wandb_args, config=vars(args), save_code=False)
 
     def modelname_generator(argmodel):
         if argmodel == 'ViT-B/32': mn = 'VITB32'
@@ -43,8 +39,20 @@ def main(args):
         if argmodel == 'ViT-L/14@336px': mn = 'VITL14px'
         else: mn = argmodel
         return mn
-        
+
     mod_flag = modelname_generator(args.model)
+
+    if args.wb_project:
+        if args.exp_name:
+            run_name = f"{args.exp_name.split('/')[-1]}_{mod_flag}_run{args.run}"
+        else:
+            run_name = args.method or None
+        wandb.init(
+            project=args.wb_project,
+            name=run_name,
+            config=vars(args),
+            save_code=False,
+        )
 
     os.makedirs(args.save + args.exp_name, exist_ok=True)
     args.save = args.save + args.exp_name + "/" + f"{mod_flag}" + '_ep' + str(args.epochs) + "_BS" + str(

@@ -1,0 +1,629 @@
+\documentclass[aspectratio=1610, fontsize=8pt]{beamer}
+
+% Choose a theme
+\usetheme{Madrid}
+
+% Define some colors
+\definecolor{unimelbblue}{RGB}{0, 33, 71}
+\setbeamercolor{palette primary}{bg=unimelbblue,fg=white}
+\setbeamercolor{palette secondary}{bg=unimelbblue,fg=white}
+\setbeamercolor{palette tertiary}{bg=unimelbblue,fg=white}
+\setbeamercolor{palette quaternary}{bg=unimelbblue,fg=white}
+\setbeamercolor{structure}{fg=unimelbblue}
+\setbeamercolor{title}{bg=white,fg=unimelbblue}
+\setbeamercolor{frametitle}{bg=white,fg=unimelbblue}
+\setbeamercolor{block title}{bg=unimelbblue!20,fg=unimelbblue}
+\setbeamercolor{block body}{bg=unimelbblue!10}
+
+% Load packages
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb}
+\usepackage{hyperref}
+\usepackage{booktabs} % For nice tables
+\usepackage{subcaption}
+\usepackage{multirow}
+\usepackage{adjustbox}
+
+% Title Page Information
+\title{PhD Progress Meeting \& Future Directions}
+\author{Hesam Asadollahzadeh}
+\institute{The University of Melbourne}
+\date{October 2025}
+
+
+\begin{document}
+
+% --- TITLE PAGE ---
+\begin{frame}
+    \maketitle
+\end{frame}
+
+% --- OUTLINE ---
+\begin{frame}
+    \frametitle{Agenda}
+    \tableofcontents
+\end{frame}
+
+% --- INTRODUCTION ---
+\section{Introduction \& Motivation}
+
+\begin{frame}
+    \frametitle{Research Context}
+    \begin{itemize}
+        \item \textbf{Problem}: Analyzing how fine-tuning methods affect CLIP model representations
+        \item \textbf{Models}: ViT-B/16 CLIP (OpenAI pretrained)
+        \item \textbf{Comparison}: Direct-FT (FLYP) vs. POMP-FT (CaRot)
+        \item \textbf{Goal}: Understand parameter and representation changes through fine-tuning
+    \end{itemize}
+    
+    \vspace{0.5cm}
+    \begin{block}{Key Questions}
+        \begin{itemize}
+            \item How do different fine-tuning methods modify model parameters?
+            \item Which layers are most affected by fine-tuning?
+            \item How do intermediate representations change?
+            \item Which method preserves pretrained knowledge better?
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Experimental Setup}
+    \begin{columns}
+        \column{0.5\textwidth}
+        \begin{block}{Models}
+            \begin{itemize}
+                \item \textbf{Pretrained}: OpenAI CLIP ViT-B/16
+                \item \textbf{Direct-FT}: FLYP method
+                \item \textbf{POMP-FT}: CaRot method
+            \end{itemize}
+        \end{block}
+        
+        \begin{block}{Datasets}
+            \begin{itemize}
+                \item ImageNet validation (10K images)
+                \item ImageNet-V2
+                \item ImageNet-A, ImageNet-R, ImageNet-Sketch
+                \item ObjectNet
+            \end{itemize}
+        \end{block}
+        
+        \column{0.5\textwidth}
+        \begin{block}{Analysis Metrics}
+            \begin{itemize}
+                \item Parameter-delta analysis
+                \item Representation-delta analysis
+                \begin{itemize}
+                    \item CKA (Centered Kernel Alignment)
+                    \item SVCCA (Singular Vector CCA)
+                \end{itemize}
+                \item Per-layer comparisons
+                \item Block-wise analysis
+            \end{itemize}
+        \end{block}
+    \end{columns}
+\end{frame}
+
+% --- METHODOLOGY ---
+\section{Methodology}
+
+\begin{frame}
+    \frametitle{Parameter-Delta Analysis}
+    \begin{block}{Metrics Computed}
+        For each parameter tensor $W$:
+        \begin{align}
+            \text{L2 Norm Delta:} \quad &\|\Delta W\|_2 = \|W_1 - W_2\|_2 \\
+            \text{Relative Delta:} \quad &\frac{\|\Delta W\|_2}{\|W_{\text{pretrained}}\|_2 + \epsilon} \\
+            \text{Cosine Similarity:} \quad &\cos(W_1, W_2) = \frac{W_1 \cdot W_2}{\|W_1\|_2 \|W_2\|_2} \\
+            \text{Frobenius Norm:} \quad &\|\Delta W\|_F \\
+            \text{Spectral Drift:} \quad &\frac{1}{k}\sum_{i=1}^{k} |\sigma_i^{(1)} - \sigma_i^{(2)}|
+        \end{align}
+    \end{block}
+    
+    \vspace{0.3cm}
+    \begin{itemize}
+        \item \textbf{Total parameters analyzed}: 302 tensors
+        \item \textbf{Granularity}: Per-module, per-layer, per-submodule
+        \item \textbf{Aggregation}: Block-wise, layer-type-wise comparisons
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{CKA: Centered Kernel Alignment}
+    \begin{block}{Definition}
+        CKA measures similarity between representations by comparing their Gram matrices:
+        \begin{align}
+            \text{CKA}(X, Y) = \frac{\|\text{HSIC}(X, X)\|_F \|\text{HSIC}(Y, Y)\|_F}{\text{HSIC}(X, Y)}
+        \end{align}
+        where HSIC is the Hilbert-Schmidt Independence Criterion (Kornblith et al., 2019).
+    \end{block}
+    
+    \begin{block}{Unbiased CKA (Linear Kernel)}
+        For features $X \in \mathbb{R}^{n \times d_1}$, $Y \in \mathbb{R}^{n \times d_2}$:
+        \begin{align}
+            \text{CKA}_{\text{unbiased}}(X, Y) = \frac{\|\text{Cov}(X, Y)\|_F^2}{\|\text{Cov}(X, X)\|_F \|\text{Cov}(Y, Y)\|_F}
+        \end{align}
+        where $\text{Cov}$ is the unbiased covariance estimator.
+    \end{block}
+    
+    \vspace{0.2cm}
+    \begin{itemize}
+        \item \textbf{Properties}: Invariant to affine transformations, rotation-invariant
+        \item \textbf{Range}: [0, 1] where 1 = identical representations
+        \item \textbf{Advantage}: More robust than correlation for high-dimensional features
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{SVCCA: Singular Vector Canonical Correlation Analysis}
+    \begin{block}{Method}
+        SVCCA combines SVD with CCA to compare representations (Raghu et al., 2017):
+        
+        \begin{enumerate}
+            \item \textbf{Dimensionality Reduction}: Apply SVD to each representation
+            \begin{align}
+                X = U_X \Sigma_X V_X^T, \quad Y = U_Y \Sigma_Y V_Y^T
+            \end{align}
+            
+            \item \textbf{Component Selection}: Retain top-$k$ components capturing 99\% variance
+            
+            \item \textbf{Canonical Correlation}: Compute CCA between reduced representations
+            \begin{align}
+                \rho_i = \text{corr}(U_X^{(i)}, U_Y^{(i)})
+            \end{align}
+            
+            \item \textbf{SVCCA Score}: Mean of canonical correlations
+            \begin{align}
+                \text{SVCCA} = \frac{1}{k}\sum_{i=1}^{k} \rho_i
+            \end{align}
+        \end{enumerate}
+    \end{block}
+    
+    \vspace{0.2cm}
+    \begin{itemize}
+        \item \textbf{Advantage}: Accounts for different dimensionalities
+        \item \textbf{Interpretation}: Measures alignment of principal directions
+        \item \textbf{Range}: [0, 1] where 1 = perfectly aligned subspaces
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Feature Extraction Pipeline}
+    \begin{block}{Hook Locations}
+        Features extracted at multiple architectural points:
+        \begin{itemize}
+            \item Patch embedding output
+            \item Each transformer block output (blocks 0-11)
+            \item Post-norm (ln\_post)
+            \item Final projection
+        \end{itemize}
+    \end{block}
+    
+    \begin{block}{Processing}
+        \begin{enumerate}
+            \item Extract CLS token or mean-pool patch embeddings
+            \item Center features: $X \leftarrow X - \bar{X}$
+            \item Compute CKA/SVCCA per layer
+            \item Aggregate across 10,000 ImageNet validation images
+        \end{enumerate}
+    \end{block}
+    
+    \vspace{0.3cm}
+    \begin{alertblock}{Note}
+        We exclude \texttt{ln\_pre} from analysis to focus on transformer block outputs and final representations.
+    \end{alertblock}
+\end{frame}
+
+% --- PARAMETER RESULTS ---
+\section{Parameter-Delta Results}
+
+\begin{frame}
+    \frametitle{Parameter Change Summary}
+    \begin{table}[h]
+        \centering
+        \small
+        \begin{tabular}{lccc}
+            \toprule
+            \textbf{Comparison} & \textbf{Mean Rel. Delta} & \textbf{Mean Cosine Sim.} & \textbf{Total Params} \\
+            \midrule
+            Pre vs Direct-FT & 0.0276 & 0.9995 & 302 \\
+            Pre vs POMP-FT & 0.0235 & 0.9997 & 302 \\
+            Direct-FT vs POMP-FT & 0.0168 & 0.9998 & 302 \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    
+    \vspace{0.5cm}
+    \begin{block}{Key Observations}
+        \begin{itemize}
+            \item \textbf{POMP-FT} shows \textbf{smaller} parameter changes than Direct-FT
+            \item Both methods maintain \textbf{very high cosine similarity} ($>0.9995$) with pretrained weights
+            \item Direct-FT vs POMP-FT shows smallest changes, indicating similar fine-tuning trajectories
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Parameter Change Heatmaps}
+    \begin{figure}
+        \centering
+        \begin{subfigure}{0.48\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{analysis/figures/param_heatmap_rel_delta_pre_vs_direct.png}
+            \caption{Pre vs Direct-FT}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{0.48\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{analysis/figures/param_heatmap_rel_delta_pre_vs_pomp.png}
+            \caption{Pre vs POMP-FT}
+        \end{subfigure}
+    \end{figure}
+    
+    \begin{block}{Interpretation}
+        \begin{itemize}
+            \item Heatmaps show relative parameter changes by block and submodule
+            \item Darker colors = larger changes
+            \item Attention layers (attn) show more changes than MLP layers
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Cosine Similarity Heatmaps}
+    \begin{figure}
+        \centering
+        \begin{subfigure}{0.48\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{analysis/figures/param_heatmap_cosine_pre_vs_direct.png}
+            \caption{Pre vs Direct-FT}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{0.48\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{analysis/figures/param_heatmap_cosine_pre_vs_pomp.png}
+            \caption{Pre vs POMP-FT}
+        \end{subfigure}
+    \end{figure}
+    
+    \begin{block}{Findings}
+        \begin{itemize}
+            \item POMP-FT maintains higher cosine similarity across most layers
+            \item Later transformer blocks show slightly lower similarity
+            \item Both methods preserve pretrained structure remarkably well
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Block-Wise Analysis}
+    \begin{figure}
+        \centering
+        \includegraphics[width=0.85\textwidth]{analysis/figures/block_wise_analysis.png}
+    \end{figure}
+    
+    \begin{block}{Key Patterns}
+        \begin{itemize}
+            \item Early blocks (0-3): Minimal changes
+            \item Middle blocks (4-7): Moderate changes
+            \item Late blocks (8-11): Slightly higher changes
+            \item Attention modules show more variance than MLP modules
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+% --- REPRESENTATION RESULTS ---
+\section{Representation-Delta Results}
+
+\begin{frame}
+    \frametitle{CKA/SVCCA Summary}
+    \begin{table}[h]
+        \centering
+        \small
+        \begin{tabular}{lccc}
+            \toprule
+            \textbf{Comparison} & \textbf{Mean CKA} & \textbf{Mean SVCCA} & \textbf{Layers} \\
+            \midrule
+            Pre vs Direct-FT & 0.8282 & 0.8004 & 15 \\
+            Pre vs POMP-FT & \textbf{0.9222} & \textbf{0.9517} & 15 \\
+            Direct-FT vs POMP-FT & 0.8572 & 0.8367 & 15 \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    
+    \vspace{0.5cm}
+    \begin{alertblock}{Key Finding}
+        \textbf{POMP-FT preserves pretrained representations significantly better} than Direct-FT:
+        \begin{itemize}
+            \item CKA: 0.9222 vs 0.8282 (+11.4\%)
+            \item SVCCA: 0.9517 vs 0.8004 (+18.9\%)
+        \end{itemize}
+    \end{alertblock}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Per-Layer CKA Analysis}
+    \begin{figure}
+        \centering
+        \includegraphics[width=0.9\textwidth]{analysis/figures/per_layer_cka_svcca.png}
+    \end{figure}
+    
+    \begin{block}{Observations}
+        \begin{itemize}
+            \item \textbf{Patch embedding}: Very high similarity (>0.95) for both methods
+            \item \textbf{Early blocks (0-3)}: High CKA, minimal divergence
+            \item \textbf{Middle blocks (4-7)}: Gradual divergence
+            \item \textbf{Late blocks (8-11)}: POMP-FT maintains higher similarity
+            \item \textbf{Final layers}: POMP-FT shows better preservation
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Comprehensive CKA/SVCCA Analysis}
+    \begin{figure}
+        \centering
+        \includegraphics[width=0.9\textwidth]{analysis/figures/per_layer_cka_svcca_comprehensive.png}
+    \end{figure}
+    
+    \begin{block}{Layer Category Analysis}
+        \begin{itemize}
+            \item \textbf{Embedding layers}: Highest similarity (>0.95)
+            \item \textbf{Early blocks}: POMP-FT preserves better
+            \item \textbf{Middle/Late blocks}: Gradual divergence, POMP-FT advantage increases
+            \item \textbf{Final layers}: POMP-FT maintains higher alignment
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{CKA vs SVCCA Comparison}
+    \begin{columns}
+        \column{0.5\textwidth}
+        \begin{block}{CKA Strengths}
+            \begin{itemize}
+                \item Measures overall similarity
+                \item Invariant to affine transforms
+                \item Good for comparing distributions
+            \end{itemize}
+        \end{block}
+        
+        \begin{block}{SVCCA Strengths}
+            \begin{itemize}
+                \item Focuses on principal directions
+                \item Handles dimensionality differences
+                \item More interpretable for subspaces
+            \end{itemize}
+        \end{block}
+        
+        \column{0.5\textwidth}
+        \begin{block}{Consistent Findings}
+            \begin{itemize}
+                \item Both metrics agree: POMP-FT $>$ Direct-FT
+                \item SVCCA shows larger gap
+                \item POMP-FT better preserves principal components
+            \end{itemize}
+        \end{block}
+        
+        \begin{alertblock}{Interpretation}
+            POMP-FT's better SVCCA suggests it preserves \textbf{more informative directions} in the representation space.
+        \end{alertblock}
+    \end{columns}
+\end{frame}
+
+% --- KEY FINDINGS ---
+\section{Key Findings \& Conclusions}
+
+\begin{frame}
+    \frametitle{Main Findings}
+    \begin{block}{Parameter Space}
+        \begin{itemize}
+            \item \textbf{POMP-FT} changes parameters more conservatively (2.35\% vs 2.76\%)
+            \item Both methods maintain extremely high cosine similarity ($>0.9995$)
+            \item Attention layers show more changes than MLP layers
+            \item Late transformer blocks exhibit higher parameter drift
+        \end{itemize}
+    \end{block}
+    
+    \begin{block}{Representation Space}
+        \begin{itemize}
+            \item \textbf{POMP-FT} preserves pretrained representations significantly better
+            \item CKA: 0.9222 vs 0.8282 (POMP-FT vs Direct-FT)
+            \item SVCCA: 0.9517 vs 0.8004 (larger advantage)
+            \item Early layers show high similarity, divergence increases in later layers
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Comprehensive Dashboard}
+    \begin{figure}
+        \centering
+        \includegraphics[width=0.85\textwidth]{analysis/figures/comprehensive_dashboard.png}
+    \end{figure}
+    
+    \begin{block}{Summary}
+        Multiple complementary metrics consistently show that POMP-FT:
+        \begin{itemize}
+            \item Changes parameters more conservatively
+            \item Maintains higher similarity to pretrained weights
+            \item Preserves intermediate representations better
+            \item Better aligns with pretrained principal directions
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Implications}
+    \begin{block}{Why POMP-FT Preserves Better}
+        \begin{itemize}
+            \item POMP-FT's regularization mechanism (CaRot) appears to:
+            \begin{itemize}
+                \item Constrain parameter updates more effectively
+                \item Preserve pretrained feature directions
+                \item Reduce catastrophic forgetting
+            \end{itemize}
+            \item Direct-FT allows more aggressive updates, leading to:
+            \begin{itemize}
+                \item Larger parameter changes
+                \item More representation drift
+                \item Potential loss of pretrained knowledge
+            \end{itemize}
+        \end{itemize}
+    \end{block}
+    
+    \vspace{0.3cm}
+    \begin{alertblock}{Research Question}
+        Does better representation preservation translate to better generalization?
+        \begin{itemize}
+            \item \textbf{Future work}: Evaluate on OOD datasets (ImageNet-V2, ImageNet-A, etc.)
+            \item \textbf{Hypothesis}: Higher CKA/SVCCA should correlate with better OOD performance
+        \end{itemize}
+    \end{alertblock}
+\end{frame}
+
+% --- FUTURE DIRECTIONS ---
+\section{Future Directions}
+
+\begin{frame}
+    \frametitle{Planned Work}
+    \begin{block}{Immediate Next Steps}
+        \begin{enumerate}
+            \item \textbf{OOD Evaluation}
+            \begin{itemize}
+                \item Evaluate Direct-FT and POMP-FT on ImageNet-V2, ImageNet-A, ImageNet-R, ImageNet-Sketch
+                \item Correlate CKA/SVCCA scores with OOD performance
+                \item Test hypothesis: Better preservation $\rightarrow$ Better generalization
+            \end{itemize}
+            
+            \item \textbf{Linear Probe Analysis}
+            \begin{itemize}
+                \item Train linear probes on per-layer features
+                \item Measure probe accuracy vs layer depth
+                \item Compare ID vs OOD probe performance
+            \end{itemize}
+            
+            \item \textbf{Weight Interpolation}
+            \begin{itemize}
+                \item Analyze WiSE-style interpolation curves
+                \item Find optimal $\alpha$ for different methods
+                \item Understand interpolation behavior
+            \end{itemize}
+        \end{enumerate}
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Long-term Research Directions}
+    \begin{block}{Theoretical Understanding}
+        \begin{itemize}
+            \item Why does POMP-FT preserve representations better?
+            \item Theoretical analysis of the regularization mechanism
+            \item Connection between parameter changes and representation drift
+        \end{itemize}
+    \end{block}
+    
+    \begin{block}{Method Development}
+        \begin{itemize}
+            \item Design new fine-tuning methods based on insights
+            \item Explicitly optimize for representation preservation
+            \item Multi-objective optimization: accuracy + preservation
+        \end{itemize}
+    \end{block}
+    
+    \begin{block}{Broader Applications}
+        \begin{itemize}
+            \item Extend analysis to other vision models (ResNet, ConvNeXt)
+            \item Study language model fine-tuning
+            \item Multi-modal model analysis
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+% --- REFERENCES ---
+\section{References}
+
+\begin{frame}[allowframebreaks]
+    \frametitle{References}
+    \footnotesize
+    \begin{enumerate}
+        \item Kornblith, S., Norouzi, M., Lee, H., \& Hinton, G. (2019). 
+        \textit{Similarity of neural network representations revisited}. 
+        ICML 2019.
+        
+        \item Raghu, M., Gilmer, J., Yosinski, J., \& Sohl-Dickstein, J. (2017).
+        \textit{SVCCA: Singular vector canonical correlation analysis for deep learning dynamics and interpretability}.
+        NeurIPS 2017.
+        
+        \item Wortsman, M., \textit{et al.} (2022).
+        \textit{Model soups: averaging weights of fine-tuned models improves accuracy without increasing inference time}.
+        ICML 2022.
+        
+        \item Radford, A., \textit{et al.} (2021).
+        \textit{Learning transferable visual models from natural language supervision}.
+        ICML 2021.
+        
+        \item FLYP: Fine-tuning method (add your specific reference)
+        
+        \item CaRot: Your POMP-FT method (add your specific reference)
+    \end{enumerate}
+\end{frame}
+
+% --- BACKUP SLIDES ---
+\section{Appendix}
+
+\begin{frame}
+    \frametitle{Parameter Metrics Overview}
+    \begin{figure}
+        \centering
+        \includegraphics[width=0.85\textwidth]{analysis/figures/parameter_metrics_overview.png}
+    \end{figure}
+    
+    \begin{block}{Details}
+        Comprehensive view of parameter change distributions, layer-type comparisons, and top-changed parameters.
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Methodological Details}
+    \begin{block}{Implementation}
+        \begin{itemize}
+            \item \textbf{Models}: ViT-B/16 CLIP (OpenAI pretrained)
+            \item \textbf{Feature Extraction}: Forward hooks at 15 locations
+            \item \textbf{Images}: 10,000 ImageNet validation images
+            \item \textbf{Batch Size}: 128, GPU-accelerated
+            \item \textbf{Caching}: Features cached for reproducibility
+        \end{itemize}
+    \end{block}
+    
+    \begin{block}{Computational Details}
+        \begin{itemize}
+            \item CKA: Unbiased linear kernel implementation
+            \item SVCCA: Auto-component selection (99\% variance threshold)
+            \item All metrics computed in float32 precision
+            \item GPU-aware with CPU fallback
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Thank You}
+    \begin{center}
+        \Huge Questions?
+        
+        \vspace{1cm}
+        \Large Contact: hesam.asadollahzadeh@unimelb.edu.au
+    \end{center}
+    
+    \vspace{1cm}
+    \begin{block}{Code \& Data}
+        \begin{itemize}
+            \item Analysis code: \texttt{tools/checkpoint\_arch\_analysis.py}
+            \item Visualization: \texttt{tools/visualize\_analysis\_results.py}
+            \item Results: \texttt{analysis/} directory
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\end{document}
+

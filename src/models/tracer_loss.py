@@ -21,6 +21,8 @@ from src.models.beta_moving_average import (
     create_linear_warmup_ema_momentum,
 )
 from src.models.clip_knowledge_distillation import create_clip_kd_module, calculate_teacher_statistics
+from src.models.geodesic_mix import sph_inter, sample_beta_lambda
+from src.datasets_.spatial_captions import SpatialCaptionIndex, log_spatial_index_stats
 import src.datasets_ as datasets
 
 
@@ -46,14 +48,37 @@ def tracer_loss(args, clip_encoder, classification_head, logger):
         preprocess_fn, location=args.data_location, batch_size=args.batch_size
     )
 
+    spatial_index = None
+    if getattr(args, "use_spatial_captions", 0) and getattr(args, "spatial_captions_jsonl", None):
+        spatial_index = SpatialCaptionIndex(args.spatial_captions_jsonl, args.data_location)
+        msg = f"Loaded {len(spatial_index)} spatial captions from {args.spatial_captions_jsonl}"
+        print(f"[spatial-captions] {msg}", flush=True)
+        logger.info(msg)
+
     img_text_data = get_data(
-        args, (clip_encoder.train_preprocess, clip_encoder.val_preprocess), epoch=0
+        args,
+        (clip_encoder.train_preprocess, clip_encoder.val_preprocess),
+        epoch=0,
+        spatial_caption_index=spatial_index,
     )
     assert len(img_text_data), "At least one train or eval dataset must be specified."
     ft_dataloader = img_text_data["train_ft"].dataloader
     ft_iterator = iter(ft_dataloader)
     num_batches = len(dataset.train_loader)
     print(f"Num batches is {num_batches}")
+
+    use_spatial = bool(getattr(args, "use_spatial_captions", 0)) and (spatial_index is not None)
+    if getattr(args, "use_spatial_captions", 0) and spatial_index is None:
+        logger.warning(
+            "--use-spatial-captions is set but --spatial-captions-jsonl was not provided; "
+            "falling back to template-only training."
+        )
+
+    if spatial_index is not None:
+        try:
+            log_spatial_index_stats(spatial_index, ft_dataloader.dataset.images, logger=logger)
+        except Exception as e:
+            logger.warning(f"Could not compute spatial-caption match rate: {e}")
 
     fp16_scaler = None
     if args.use_fp16:
@@ -202,6 +227,11 @@ def tracer_loss(args, clip_encoder, classification_head, logger):
             'temp_distil_loss': 0.0,
             'total_kd_loss': 0.0
         }
+
+        m2_loss_sum = 0.0
+        spatial_match_sum = 0.0
+        spatial_match_count = 0
+        sanity_done = False
         
         # Initialize teacher statistics tracking
         teacher_stats_accumulator = {}
@@ -230,31 +260,173 @@ def tracer_loss(args, clip_encoder, classification_head, logger):
                 )  # If ft_iterator is all used, re-initialize it
                 ft_batch = next(ft_iterator)
             
-            # Try to unpack labels if available
             ft_labels = None
             use_supcon = False
-            if len(ft_batch) == 3:
-                ft_image, ft_text, ft_labels = ft_batch
-                ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
-                ft_labels = ft_labels.cuda()
-                use_supcon = True
-                if not supcon_logged_this_epoch:
-                    logger.info(f"Using supervised CLIP loss with labels for epoch {epoch}")
-                    supcon_logged_this_epoch = True
+            ft_text_tmpl = None
+            ft_text_sp = None
+            has_spatial = None
+
+            if use_spatial:
+                if len(ft_batch) == 5:
+                    ft_image, ft_text_tmpl, ft_text_sp, has_spatial, ft_labels = ft_batch
+                    ft_labels = ft_labels.cuda()
+                    use_supcon = True
+                    if not supcon_logged_this_epoch:
+                        logger.info(f"Using supervised CLIP loss with labels for epoch {epoch}")
+                        supcon_logged_this_epoch = True
+                else:
+                    ft_image, ft_text_tmpl, ft_text_sp, has_spatial = ft_batch
+                ft_image = ft_image.cuda()
+                ft_text_tmpl = ft_text_tmpl.cuda()
+                ft_text_sp = ft_text_sp.cuda()
+                has_spatial = has_spatial.cuda()
+                # Downstream blocks (teacher forward etc.) still reference ft_text.
+                ft_text = ft_text_tmpl
             else:
-                ft_image, ft_text = ft_batch
-                ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
-            
+                if len(ft_batch) == 3:
+                    ft_image, ft_text, ft_labels = ft_batch
+                    ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
+                    ft_labels = ft_labels.cuda()
+                    use_supcon = True
+                    if not supcon_logged_this_epoch:
+                        logger.info(f"Using supervised CLIP loss with labels for epoch {epoch}")
+                        supcon_logged_this_epoch = True
+                else:
+                    ft_image, ft_text = ft_batch
+                    ft_image, ft_text = ft_image.cuda(), ft_text.cuda()
+
+            lam_tt_eff = None
+            txt_feat_tmpl = None
+            txt_feat_sp = None
+            txt_feat_mixed = None
+            m2_loss_value = 0.0
+
             with torch.amp.autocast('cuda', dtype=torch.bfloat16 if fp16_scaler is not None else torch.float32):
-                ft_image_features, ft_text_features, logit_scale2 = model(
-                    ft_image, ft_text
-                )
+                if use_spatial:
+                    # Encode image once; call encode_text directly for the spatial pass
+                    # so we don't re-run the (much larger) image encoder.
+                    img_feat, txt_feat_tmpl, logit_scale2 = model(ft_image, ft_text_tmpl)
+                    core_model = model.module.model if hasattr(model, "module") else model.model
+                    try:
+                        txt_feat_sp = core_model.encode_text(ft_text_sp, normalize=True)
+                    except TypeError:
+                        # OpenAI CLIP's encode_text has no `normalize` kwarg.
+                        txt_feat_sp = core_model.encode_text(ft_text_sp)
+                        txt_feat_sp = txt_feat_sp / (txt_feat_sp.norm(dim=-1, keepdim=True) + 1e-12)
+
+                    B = ft_image.size(0)
+                    lam_tt = sample_beta_lambda(
+                        args.alpha_tt_mix, args.beta_tt_mix,
+                        ft_image.device, bool(args.tt_per_sample), B=B,
+                    )
+                    # lambda=1 pins samples without a spatial caption to pure template.
+                    has_sp_bool = has_spatial.bool()
+                    if lam_tt.numel() == B:
+                        lam_tt_eff = torch.where(has_sp_bool, lam_tt, torch.ones_like(lam_tt))
+                    else:
+                        lam_tt_eff = lam_tt if has_sp_bool.all() else torch.ones_like(lam_tt)
+
+                    txt_feat_mixed = sph_inter(txt_feat_tmpl, txt_feat_sp, lam_tt_eff)
+
+                    if lam_tt.numel() == B:
+                        mask = has_sp_bool.view(-1, 1).expand_as(txt_feat_mixed)
+                        txt_feat_mixed = torch.where(mask, txt_feat_mixed, txt_feat_tmpl)
+
+                    ft_image_features = img_feat
+                    ft_text_features = txt_feat_mixed
+                    spatial_match_sum += has_sp_bool.float().mean().item()
+                    spatial_match_count += 1
+                else:
+                    ft_image_features, ft_text_features, logit_scale2 = model(
+                        ft_image, ft_text
+                    )
 
                 lscale = logit_scale2 if len(devices) == 1 else logit_scale2[0]
 
                 ft_clip_loss, logits_per_image, logits_per_text = clip_loss_fn(
                     ft_image_features, ft_text_features, lscale
                 )
+
+                if use_spatial and args.beta_mix_coef > 0:
+                    if args.beta_mix_target == "spatial":
+                        target_text = txt_feat_sp
+                    elif args.beta_mix_target == "template":
+                        target_text = txt_feat_tmpl
+                    elif args.beta_mix_target == "alpha_mixed":
+                        target_text = txt_feat_mixed
+                    else:
+                        raise ValueError(f"unknown --beta-mix-target: {args.beta_mix_target}")
+
+                    B = ft_image_features.size(0)
+                    lam_it = sample_beta_lambda(
+                        args.alpha_it_mix, args.alpha_it_mix,
+                        ft_image_features.device, bool(args.it_per_sample), B=B,
+                    )
+                    mixed_it = sph_inter(ft_image_features, target_text, lam_it)
+
+                    # open_clip's `logit_scale2` is already .exp()'d, so `lscale` IS the
+                    # multiplier (~100). tau2>0 uses the literal value as m_tau for the
+                    # off-diagonal negatives (reference default 0.01).
+                    scale_pos = lscale
+                    scale_neg = (
+                        torch.tensor(args.tau2, device=ft_image_features.device, dtype=ft_image_features.dtype)
+                        if args.tau2 > 0 else lscale
+                    )
+
+                    I_mat = torch.eye(B, device=ft_image_features.device, dtype=ft_image_features.dtype)
+                    off_diag = 1.0 - I_mat
+
+                    logits_pos_i2t = scale_pos * (ft_image_features @ txt_feat_tmpl.T)
+                    logits_pos_t2i = scale_pos * (txt_feat_tmpl @ ft_image_features.T)
+                    logits_neg_i2t = scale_neg * (ft_image_features @ mixed_it.T)
+                    logits_neg_t2i = scale_neg * (txt_feat_tmpl @ mixed_it.T)
+
+                    logits_m2_i2t = logits_pos_i2t * I_mat + logits_neg_i2t * off_diag
+                    logits_m2_t2i = logits_pos_t2i * I_mat + logits_neg_t2i * off_diag
+
+                    labels = torch.arange(B, device=ft_image_features.device)
+                    m2_loss = 0.5 * (
+                        F.cross_entropy(logits_m2_i2t, labels)
+                        + F.cross_entropy(logits_m2_t2i, labels)
+                    )
+
+                    ft_clip_loss = ft_clip_loss + args.beta_mix_coef * m2_loss
+                    m2_loss_value = m2_loss.item()
+                    m2_loss_sum += args.beta_mix_coef * m2_loss_value
+
+                    if args.sanity_check and not sanity_done:
+                        with torch.no_grad():
+                            hard_sim = (ft_image_features * mixed_it).sum(-1).mean().item()
+                            perm = torch.randperm(B, device=ft_image_features.device)
+                            while B > 1 and (perm == torch.arange(B, device=perm.device)).any():
+                                perm = torch.randperm(B, device=ft_image_features.device)
+                            rand_sim = (ft_image_features * txt_feat_tmpl[perm]).sum(-1).mean().item()
+                            msg = (
+                                f"[sanity] scenario-beta hardness: mix_sim={hard_sim:.4f} "
+                                f"vs random-offdiag_sim={rand_sim:.4f} "
+                                f"(mix should be >= random for hardness to help)"
+                            )
+                            print(msg, flush=True)
+                            logger.info(msg)
+
+                if args.sanity_check and use_spatial and not sanity_done:
+                    with torch.no_grad():
+                        norms = txt_feat_mixed.norm(dim=-1)
+                        assert torch.all((norms - 1.0).abs() < 1e-2), (
+                            f"[sanity] mixed text not unit norm: min={norms.min()} max={norms.max()}"
+                        )
+                        test_m1 = sph_inter(txt_feat_tmpl, txt_feat_sp, 1.0)
+                        test_m0 = sph_inter(txt_feat_tmpl, txt_feat_sp, 0.0)
+                        err1 = (test_m1 - txt_feat_tmpl).norm(dim=-1).max().item()
+                        err0 = (test_m0 - txt_feat_sp).norm(dim=-1).max().item()
+                        msg = (
+                            f"[sanity] endpoint recovery: |mix(s=1)-tmpl|={err1:.2e}, "
+                            f"|mix(s=0)-sp|={err0:.2e}"
+                        )
+                        print(msg, flush=True)
+                        logger.info(msg)
+                        assert err1 < 1e-2 and err0 < 1e-2, "[sanity] endpoint recovery failed"
+                    sanity_done = True
 
                 #* d-rank SVD approximation
                 if args.cross_fnorm:
@@ -443,6 +615,8 @@ def tracer_loss(args, clip_encoder, classification_head, logger):
                 base_clip_loss -= args.l_orth_wv * orth_val
             if args.distil_coef and kd_module is None and isinstance(dist_loss, torch.Tensor):
                 base_clip_loss -= args.distil_coef * dist_loss.item()
+            if use_spatial and args.beta_mix_coef > 0:
+                base_clip_loss -= args.beta_mix_coef * m2_loss_value
             clip_loss_sum += base_clip_loss
 
             id_tracer_loss_sum += ft_clip_loss.item()
@@ -560,7 +734,37 @@ def tracer_loss(args, clip_encoder, classification_head, logger):
                 # Add logit scale
                 log_msg += f"\n\tLogit Scale: {lscale.exp().item():.4f}"
                 wandb_log.update({"Logit Scale": lscale.exp().item()})
-                
+
+                if use_spatial and lam_tt_eff is not None and txt_feat_mixed is not None:
+                    match_rate = has_spatial.float().mean().item()
+                    lam_mean = lam_tt_eff.float().mean().item()
+                    lam_std = (
+                        lam_tt_eff.float().std().item() if lam_tt_eff.numel() > 1 else 0.0
+                    )
+                    cos_tmpl = (txt_feat_mixed * txt_feat_tmpl).sum(-1).mean().item()
+                    cos_sp = (txt_feat_mixed * txt_feat_sp).sum(-1).mean().item()
+                    log_msg += (
+                        f"\n\tSpatial match rate: {match_rate:.3f}"
+                        f"\n\tAlpha lambda (mean/std): {lam_mean:.3f} / {lam_std:.3f}"
+                        f"\n\tText mixed-vs-(tmpl/sp) cos: {cos_tmpl:.3f} / {cos_sp:.3f}"
+                    )
+                    wandb_log.update({
+                        "Spatial match rate": match_rate,
+                        "Alpha lambda mean": lam_mean,
+                        "Alpha lambda std": lam_std,
+                        "Text mixed-vs-template cos": cos_tmpl,
+                        "Text mixed-vs-spatial cos": cos_sp,
+                    })
+                    if args.beta_mix_coef > 0:
+                        log_msg += (
+                            f"\n\tScenario-beta m2 loss: {m2_loss_value:.4f} "
+                            f"(weighted: {args.beta_mix_coef * m2_loss_value:.4f})"
+                        )
+                        wandb_log.update({
+                            "Scenario-beta m2 loss": m2_loss_value,
+                            "Scenario-beta weighted": args.beta_mix_coef * m2_loss_value,
+                        })
+
                 logger.info(log_msg)
                 wandb.log(wandb_log)
 
@@ -585,6 +789,16 @@ def tracer_loss(args, clip_encoder, classification_head, logger):
             orth_loss_avg = orth_loss_sum / num_batches
             epoch_stats["Avg Orthogonality Loss"] = round(orth_loss_avg, 4)
             logger.info(f"  Avg Orthogonality Loss: {orth_loss_avg:.4f}")
+
+        if use_spatial:
+            if spatial_match_count > 0:
+                match_avg = spatial_match_sum / spatial_match_count
+                epoch_stats["Avg Spatial Match Rate"] = round(match_avg, 4)
+                logger.info(f"  Avg Spatial Match Rate: {match_avg:.4f}")
+            if args.beta_mix_coef > 0:
+                m2_loss_avg = m2_loss_sum / num_batches
+                epoch_stats["Avg Scenario-beta m2 Loss"] = round(m2_loss_avg, 4)
+                logger.info(f"  Avg Scenario-beta m2 Loss (weighted): {m2_loss_avg:.4f}")
 
         if args.distil_coef and kd_module is None:
             # Only log basic distillation loss if kd_module is not used
@@ -631,7 +845,7 @@ def tracer_loss(args, clip_encoder, classification_head, logger):
         classification_head_new = classification_head_new.cuda()
 
         # Saving model
-        if args.save is not None and epoch % 9 == 0:
+        if args.save is not None: # and epoch % 9 == 0:
             os.makedirs(args.save, exist_ok=True)
             model_path = os.path.join(args.save, f"checkpoint_{epoch+1}.pt")
             logger.info("Saving model to" + str(model_path))

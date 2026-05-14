@@ -22,7 +22,15 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-SD_WEIGHT = 0.5
+SD_WEIGHT = 0.1
+
+TEXT_TEMPLATES = [
+            "the digit {}", 
+            "number {}", 
+            "handwritten {}", 
+            "a {} digit",
+            "the number {} written by hand"
+        ]
 
 # Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -54,13 +62,7 @@ class MNISTMultiModal(Dataset):
     def __init__(self, mnist_dataset):
         self.mnist = mnist_dataset
         # Simple text templates for MNIST digits
-        self.templates = [
-            "the digit {}", 
-            "number {}", 
-            "handwritten {}", 
-            "a {} digit",
-            "the number {} written by hand"
-        ]
+        self.templates = TEXT_TEMPLATES
         
     def __len__(self):
         return len(self.mnist)
@@ -87,13 +89,7 @@ class ColoredMNISTMultiModal(Dataset):
         self.invert_mapping = bool(invert_mapping)
         self.color_intensity = float(color_intensity)
         # Text templates for colored digits
-        self.templates = [
-            "the digit {}", 
-            "number {}", 
-            "handwritten {}", 
-            "a {} digit",
-            "the number {} written by hand"
-        ]
+        self.templates = TEXT_TEMPLATES
         self.colors = ['red', 'blue']
         
     def __len__(self):

@@ -30,7 +30,8 @@ class CsvDataset(Dataset):
                  img_key,
                  caption_key,
                  sep="\t",
-                 label_key=None):
+                 label_key=None,
+                 spatial_caption_index=None):
         logging.debug(f'Loading csv data from {input_filename}.')
         df = pd.read_csv(input_filename, sep=sep)
 
@@ -51,6 +52,8 @@ class CsvDataset(Dataset):
             self.return_label = True
             self.labels = list(map(int, df[label_key].tolist()))
         self.transforms = transforms
+        # When set, __getitem__ returns (image, tmpl_tokens, spatial_tokens, has_spatial[, label]).
+        self.spatial_caption_index = spatial_caption_index
         logging.debug('Done loading data.')
         #pdb.set_trace()
 
@@ -60,7 +63,7 @@ class CsvDataset(Dataset):
     def __getitem__(self, idx):
         images = self.transforms(Image.open(str(self.images[idx])))
         texts = tokenize([str(self.captions[idx])])[0]
-        
+
         if len(self.captions_list) > 0:
             texts_list = [
                 tokenize([str(self.captions_list[i][idx])])[0]
@@ -71,6 +74,18 @@ class CsvDataset(Dataset):
             perm = torch.randperm(texts_list.shape[0])
 
             texts_list = texts_list[perm, :]
+
+        if self.spatial_caption_index is not None:
+            sp = self.spatial_caption_index.get(str(self.images[idx]))
+            if sp is None:
+                texts_sp = texts.clone()
+                has_spatial = torch.tensor(False)
+            else:
+                texts_sp = tokenize([str(sp)])[0]
+                has_spatial = torch.tensor(True)
+            if self.return_label:
+                return images, texts, texts_sp, has_spatial, self.labels[idx]
+            return images, texts, texts_sp, has_spatial
 
         if self.return_label:
             label = self.labels[idx]
@@ -455,7 +470,7 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False):
     return DataInfo(dataloader=dataloader, shared_epoch=shared_epoch)
 
 
-def get_csv_dataset(args, preprocess_fn, is_train, epoch=0):
+def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, spatial_caption_index=None):
     input_filename = args.ft_data if is_train else args.val_data
     assert input_filename
 
@@ -470,7 +485,8 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0):
                          img_key=args.csv_img_key,
                          caption_key=args.csv_caption_key,
                          sep=args.csv_separator,
-                         label_key=label_key)
+                         label_key=label_key,
+                         spatial_caption_index=spatial_caption_index if is_train else None)
     num_samples = len(dataset)
     # sampler = DistributedSampler(dataset) if args.distributed and is_train else None
     sampler = None
@@ -512,14 +528,15 @@ def get_dataset_fn(data_path, dataset_type):
         raise ValueError(f"Unsupported dataset type: {dataset_type}")
 
 
-def get_data(args, preprocess_fns, epoch=0):
+def get_data(args, preprocess_fns, epoch=0, spatial_caption_index=None):
     preprocess_train, preprocess_val = preprocess_fns
     data = {}
 
-    data["train_ft"] = get_dataset_fn(args.ft_data,
-                                      args.dataset_type)(args,
-                                                         preprocess_train,
-                                                         is_train=True,
-                                                         epoch=epoch)
+    ds_fn = get_dataset_fn(args.ft_data, args.dataset_type)
+    if ds_fn is get_csv_dataset:
+        data["train_ft"] = ds_fn(args, preprocess_train, is_train=True, epoch=epoch,
+                                 spatial_caption_index=spatial_caption_index)
+    else:
+        data["train_ft"] = ds_fn(args, preprocess_train, is_train=True, epoch=epoch)
 
     return data

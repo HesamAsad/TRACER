@@ -488,6 +488,31 @@ def parse_arguments():
         help="Overall regularization strength for EW-SD. Default: 0.0 (disabled)",
     )
 
+    parser.add_argument("--use-spatial-captions", type=int, default=0,
+                        help="Master switch for spatial-caption geodesic mixing (0 = inert).")
+    parser.add_argument("--spatial-captions-jsonl", type=str, default=None,
+                        help="JSONL with keys 'image' and 'dense_caption'.")
+    parser.add_argument("--alpha-tt-mix", type=float, default=0.2,
+                        help="Beta(alpha, .) for Scenario-alpha text-text mix; U-shape when < 1.")
+    parser.add_argument("--beta-tt-mix", type=float, default=0.2,
+                        help="Beta(., beta) for Scenario-alpha text-text mix.")
+    parser.add_argument("--tt-per-sample", type=int, default=0,
+                        help="1 = one lambda per sample; 0 = one per batch.")
+    parser.add_argument("--beta-mix-coef", type=float, default=0.0,
+                        help="Weight for Scenario-beta hard negatives; 0 = alpha-only.")
+    parser.add_argument("--alpha-it-mix", type=float, default=0.5,
+                        help="Symmetric Beta(alpha, alpha) for Scenario-beta image-text mix.")
+    parser.add_argument("--it-per-sample", type=int, default=0,
+                        help="1 = one lambda per sample; 0 = one per batch.")
+    parser.add_argument("--beta-mix-target", type=str, default="spatial",
+                        choices=["spatial", "template", "alpha_mixed"],
+                        help="Text vector to bridge with the image in Scenario beta.")
+    parser.add_argument("--tau2", type=float, default=0.0,
+                        help="Literal m_tau for Scenario-beta off-diagonal negatives "
+                             "(reference default 0.01); <=0 reuses the learned logit scale.")
+    parser.add_argument("--sanity-check", action="store_true", default=False,
+                        help="Assert geodesic-mix invariants on the first batch.")
+
     parsed_args = parser.parse_args()
 
     parsed_args.device = "cuda" if torch.cuda.is_available() else "cpu"
