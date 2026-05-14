@@ -19,7 +19,7 @@ if REPO_ROOT not in sys.path:
 from src.datasets_.imagenet_classnames import get_classnames
 
 
-# Adopt plot styles similar to toy_experiment_repr_analyze.py
+# Prefer readable sans-serif fonts for figure typography
 _PREFERRED_SANS_SERIF = ['Inter', 'Roboto', 'SF Pro Display', 'Avenir', 'DejaVu Sans', 'Liberation Sans', 'Arial', 'sans-serif']
 
 def _select_preferred_sans_serif():
