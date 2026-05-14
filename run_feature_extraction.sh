@@ -2,7 +2,8 @@
 
 # Example script to run ImageNet feature extraction
 # Modify the paths according to your setup
-cd /data/projects/punim1316/CaRot
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 echo "working directory: $PWD"
 export PYTHONPATH="$PYTHONPATH:$PWD"
 

@@ -1,4 +1,4 @@
-# Model Comparison Report: DINOv2 vs CLIP vs CaRot
+# Model Comparison Report: DINOv2 vs CLIP vs TRACER
 
 ## Overall Performance Summary
 
@@ -9,7 +9,7 @@
 - Average Between-class Similarity: 0.043
 - Separation (Within - Between): 0.320
 
-### carot
+### tracer
 - Average Silhouette Score: 0.050
 - Average Davies-Bouldin Score: 3.362
 - Average Within-class Similarity: 0.678
@@ -48,7 +48,7 @@
 ## Key Findings
 
 1. **Overall Best Model**: dinov2 with highest average silhouette score
-2. **CaRot Performance**: Shows improvement over base CLIP (Silhouette: 0.050 vs 0.007)
+2. **TRACER Performance**: Shows improvement over base CLIP (Silhouette: 0.050 vs 0.007)
 3. **Generalization**: Performance varies significantly across different ImageNet variants
 4. **Representation Quality**: DINOv2 consistently shows strong clustering properties
 

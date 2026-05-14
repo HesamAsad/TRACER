@@ -83,7 +83,7 @@ def _load_image_classifier(path, args):
     if isinstance(loaded, ImageClassifier):
         return loaded.to(args.device)
 
-    # If the file actually contains a CLIPEncoder (common for carot checkpoints)
+    # If the file actually contains a CLIPEncoder (common for TRACER checkpoints)
     if isinstance(loaded, CLIPEncoder):
         enc = loaded.to(args.device)
     else:

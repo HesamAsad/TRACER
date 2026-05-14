@@ -250,7 +250,7 @@ def parse_arguments():
     )
 
    
-    #! carot --------------------------
+    #! tracer (CLIP fine-tuning) --------------------------
     parser.add_argument(
         "--distil_coef",
         type=float,
@@ -407,7 +407,7 @@ def parse_arguments():
         "--method",
         type=str,
         default="",
-        help="zs / ft / flyp / lpft / carot ...",
+        help="training recipe: zs | lp | ft | lpft | ew | tracer | tracer_ldreg | tracer_rn50 | flyp_ldreg | ...",
     )
 
     parser.add_argument(
@@ -498,13 +498,13 @@ def parse_arguments():
 
 
 # # 1. Freeze entire text encoder (ALL text components)
-# python train.py --method carot --freeze_text_encoder
+# python train.py --method tracer --freeze_text_encoder
 
 # # 2. Fine-tune only last 2 transformer layers + embeddings/projections  
-# python train.py --method carot --trainable_layers 2
+# python train.py --method tracer --trainable_layers 2
 
 # # 3. Extreme fine-tuning: only logit_scale trainable
-# python train.py --method carot --trainable_layers 0
+# python train.py --method tracer --trainable_layers 0
 
 # # 4. Text frozen + only vision embeddings/projections trainable
-# python train.py --method carot --freeze_text_encoder --trainable_layers 0
+# python train.py --method tracer --freeze_text_encoder --trainable_layers 0

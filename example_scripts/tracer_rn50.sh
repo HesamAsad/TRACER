@@ -1,6 +1,7 @@
 #!/bin/bash
 
-cd /data/projects/punim1316/CaRot
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 echo "working directory: $PWD"
 export PYTHONPATH="$PYTHONPATH:$PWD"
 
@@ -8,7 +9,7 @@ lr=9e-6
 wd=0.02
 bs=512
 ts=0.0
-method=carot_rn50
+method=tracer_rn50
 fp16=1
 seed=0
 

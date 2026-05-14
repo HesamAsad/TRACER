@@ -1,4 +1,4 @@
-name: carot
+name: tracer
 channels:
   - conda-forge
   - defaults

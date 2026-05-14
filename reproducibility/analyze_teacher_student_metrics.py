@@ -3,12 +3,10 @@
 Comprehensive analysis for teacher-student metrics to support paper figures.
 
 Reads all CSVs in a metrics directory (default: teacher_student_metrics/) and produces:
-- Time-series overlays per metric comparing:
-  * POMP vs CAROT (all available runs)
-  * BMA vs EMA at matched update frequencies (if available)
-  * POMP beta sweeps (overlay across different β)
-  * All-runs overlay for each metric with error bands from __MIN/__MAX
-  (All plots are smoothed with time-weighted EMA, momentum=0.99 by default.)
+- Time-series overlays per metric comparing TRACER runs (`tracer_*` wandb CSV column prefixes)
+- BMA vs EMA at matched update frequencies (when present in run ids)
+- TRACER beta sweeps (overlay across β)
+- All-runs overlay for each metric with error bands from __MIN/__MAX
 - KL-specific summary figures:
   * Early KL slope magnitude (smaller = slower decrease)
   * KL half-life (steps to reach 50% of initial KL)
@@ -46,14 +44,14 @@ ABS_IS_BETTER_KEYS = {
 @dataclass(frozen=True)
 class RunInfo:
     run_id: str
-    algorithm: Optional[str]  # "pomp", "carot", or None
+    algorithm: Optional[str]  # "tracer" if run id starts with tracer_, else None
     update_type: Optional[str]  # "bma", "ema", or None
     update_freq: Optional[int]
     beta: Optional[float]
 
     @property
     def paper_label(self) -> str:
-        prefix = "POMP" if self.algorithm == "pomp" else ("CAROT" if self.algorithm == "carot" else self.algorithm or self.run_id)
+        prefix = "TRACER" if self.algorithm == "tracer" else (self.algorithm or self.run_id)
         suffix_parts: List[str] = []
         if self.update_type:
             suffix_parts.append(self.update_type.upper())
@@ -72,10 +70,8 @@ RUN_ID_RE = re.compile(r"^(?P<run>[^-]+)\s*-\s*(?P<base>.+)$")
 def parse_run_info(run_id: str) -> RunInfo:
     rid = run_id.strip()
     algorithm: Optional[str] = None
-    if rid.startswith("pomp"):
-        algorithm = "pomp"
-    elif rid.startswith("carot"):
-        algorithm = "carot"
+    if rid.startswith("tracer"):
+        algorithm = "tracer"
 
     update_type: Optional[str] = None
     if "bma" in rid:
@@ -402,16 +398,16 @@ def generate_plots(long_df: pd.DataFrame, out_dir: Path) -> None:
             filename_suffix="_all_runs",
         )
 
-        # POMP vs CAROT overlay
-        run_filter = long_df["metric"].eq(metric_key) & long_df["algorithm"].isin(["pomp", "carot"])  # type: ignore
+        # TRACER runs (wandb CSV columns prefixed with tracer_*)
+        run_filter = long_df["metric"].eq(metric_key) & long_df["algorithm"].eq("tracer")  # type: ignore
         plot_time_series_overlay(
             metric_key,
             long_df,
             out_dir,
-            title_suffix="– POMP vs CAROT",
+            title_suffix="– TRACER tracked runs",
             run_filter=run_filter,
             color_by="run_id",
-            filename_suffix="_pomp_vs_carot",
+            filename_suffix="_tracer_runs",
         )
 
         # BMA vs EMA matched frequencies
@@ -432,7 +428,7 @@ def generate_plots(long_df: pd.DataFrame, out_dir: Path) -> None:
                     filename_suffix=f"_bma_vs_ema_freq_{freq}",
                 )
 
-        # Beta sweeps (POMP β)
+        # Beta sweeps (β schedule within TRACER)
         has_beta = mdf["beta"].notna().any()
         if has_beta:
             run_filter = (long_df["metric"].eq(metric_key)) & (long_df["beta"].notna())  # type: ignore
@@ -440,7 +436,7 @@ def generate_plots(long_df: pd.DataFrame, out_dir: Path) -> None:
                 metric_key,
                 long_df,
                 out_dir,
-                title_suffix="– POMP β Sweep",
+                title_suffix="– TRACER β Sweep",
                 run_filter=run_filter,
                 color_by="run_id",
                 filename_suffix="_beta_sweep",

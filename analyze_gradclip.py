@@ -27,7 +27,7 @@ df['Orth_Coef'] = pd.to_numeric(df['l_orth_wv'], errors='coerce').fillna(0)
 # Categorize configurations
 def categorize_config(row):
     name = row['Name']
-    if name == 'carot':
+    if name == 'tracer':
         return 'Base'
     elif 'Layers' in name:
         return 'Layer-specific'

@@ -5,6 +5,7 @@ import torch
 from src.models.eval import evaluate
 from src.models.ft_loss import finetune
 from src.models.tracer_loss import tracer_loss
+from src.models.tracer_ldreg import tracer_ldreg_loss
 from src.models.ew_loss import ew_loss
 from src.models.ce_ablation import ce_ablation
 from src.models.modeling import ClassificationHead, CLIPEncoder, ImageClassifier
@@ -98,6 +99,10 @@ def main(args):
     elif args.method == 'ew':
         finetuned_checkpoint = ew_loss(args, clip_encoder,
                                                classification_head, logger)
+    elif args.method == 'tracer_ldreg':
+        finetuned_checkpoint = tracer_ldreg_loss(
+            args, clip_encoder, classification_head, logger
+        )
     else:
         finetuned_checkpoint = tracer_loss(args, clip_encoder,
                                             classification_head, logger)

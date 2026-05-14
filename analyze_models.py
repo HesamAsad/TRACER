@@ -25,6 +25,8 @@ import os
 # Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+_REPO_ROOT = Path(__file__).resolve().parent
+
 def torch_load(save_path, device=None):
     with open(save_path, 'rb') as f:
         classifier = pickle.load(f)
@@ -54,22 +56,26 @@ class ModelLoader:
         return model, train_preprocess, eval_preprocess
     
     @staticmethod
-    def load_carot():
-        """Load fine-tuned CaRot CLIP model"""
+    def load_tracer():
+        """Load fine-tuned TRACER CLIP checkpoint (ViT-B/16)."""
         model, train_preprocess, eval_preprocess = clip.load("ViT-B/16", device=device, jit=False)
-        checkpoint_path = "/data/gpfs/projects/punim1316/CaRot/checkpoints/ImageNet/carot/ViT-B/16_ep10_BS512_WD0.1_LR1e-05_D1.5_OC0.2_run1/checkpoint_10.pt"
-        model = torch_load(checkpoint_path)
+        checkpoint_path = _REPO_ROOT / (
+            "checkpoints/ImageNet/tracer/ViT-B/"
+            "16_ep10_BS512_WD0.1_LR1e-05_D1.5_OC0.2_run1/checkpoint_10.pt"
+        )
+        model = torch_load(str(checkpoint_path))
         return model.model.to(device)
 
 class DatasetLoader:
     def __init__(self, batch_size=128):
         self.batch_size = batch_size
+        root = _REPO_ROOT / "datasets/data"
         self.dataset_paths = {
-            'imagenet_val': "/data/gpfs/projects/punim1316/CaRot/datasets/data/ILSVRC2012/val",
-            'imagenet_a': "/data/gpfs/projects/punim1316/CaRot/datasets/data/imagenet-a",
-            'imagenet_r': "/data/gpfs/projects/punim1316/CaRot/datasets/data/imagenet-r",
-            'imagenet_v2': "/data/gpfs/projects/punim1316/CaRot/datasets/data/ImageNetV2-matched-frequency",
-            'imagenet_sketch': "/data/gpfs/projects/punim1316/CaRot/datasets/data/sketch"
+            'imagenet_val': str(root / "ILSVRC2012/val"),
+            'imagenet_a': str(root / "imagenet-a"),
+            'imagenet_r': str(root / "imagenet-r"),
+            'imagenet_v2': str(root / "ImageNetV2-matched-frequency"),
+            'imagenet_sketch': str(root / "sketch"),
         }
         
     def get_transform(self, model_type='clip'):
@@ -367,7 +373,7 @@ class ResultsAggregator:
     
     def generate_similarity_distributions(self):
         """Generate similarity distribution plots"""
-        model_names = ['dinov2', 'clip_base', 'carot']
+        model_names = ['dinov2', 'clip_base', 'tracer']
         dataset_names = ['imagenet_val', 'imagenet_a', 'imagenet_r', 'imagenet_v2', 'imagenet_sketch']
         
         fig, axes = plt.subplots(len(model_names), len(dataset_names), figsize=(25, 15))
@@ -409,7 +415,7 @@ class ResultsAggregator:
         results = self.load_all_results()
         df = pd.DataFrame(results)
         
-        report = "# Model Comparison Report: DINOv2 vs CLIP vs CaRot\n\n"
+        report = "# Model Comparison Report: DINOv2 vs CLIP vs TRACER\n\n"
         
         # Overall performance summary
         report += "## Overall Performance Summary\n\n"
@@ -454,18 +460,18 @@ class ResultsAggregator:
         best_model = model_scores['silhouette_score'].idxmax()
         report += f"1. **Overall Best Model**: {best_model} with highest average silhouette score\n"
         
-        # Analyze CaRot performance
-        if 'carot' in df['model_name'].values:
-            carot_data = df[df['model_name'] == 'carot']
+        # Analyze TRACER performance
+        if 'tracer' in df['model_name'].values:
+            tracer_data = df[df['model_name'] == 'tracer']
             clip_data = df[df['model_name'] == 'clip_base']
             
-            carot_avg_sil = carot_data['silhouette_score'].mean()
+            tracer_avg_sil = tracer_data['silhouette_score'].mean()
             clip_avg_sil = clip_data['silhouette_score'].mean()
             
-            if carot_avg_sil < clip_avg_sil:
-                report += f"2. **CaRot Performance**: Shows degradation compared to base CLIP (Silhouette: {carot_avg_sil:.3f} vs {clip_avg_sil:.3f})\n"
+            if tracer_avg_sil < clip_avg_sil:
+                report += f"2. **TRACER Performance**: Shows degradation compared to base CLIP (Silhouette: {tracer_avg_sil:.3f} vs {clip_avg_sil:.3f})\n"
             else:
-                report += f"2. **CaRot Performance**: Shows improvement over base CLIP (Silhouette: {carot_avg_sil:.3f} vs {clip_avg_sil:.3f})\n"
+                report += f"2. **TRACER Performance**: Shows improvement over base CLIP (Silhouette: {tracer_avg_sil:.3f} vs {clip_avg_sil:.3f})\n"
         
         report += "3. **Generalization**: Performance varies significantly across different ImageNet variants\n"
         report += "4. **Representation Quality**: DINOv2 consistently shows strong clustering properties\n\n"
@@ -485,7 +491,7 @@ def main():
     model_configs = [
         ('dinov2', 'dinov2'),
         ('clip_base', 'clip'),
-        ('carot', 'clip')
+        ('tracer', 'clip')
     ]
     
     dataset_names = ['imagenet_val', 'imagenet_a', 'imagenet_r', 'imagenet_v2', 'imagenet_sketch']
@@ -501,8 +507,8 @@ def main():
             model = ModelLoader.load_dinov2()
         elif model_name == 'clip_base':
             model, _, _ = ModelLoader.load_clip_base()
-        elif model_name == 'carot':
-            model = ModelLoader.load_carot()
+        elif model_name == 'tracer':
+            model = ModelLoader.load_tracer()
         
         # Get appropriate transform
         dataset_loader = DatasetLoader()

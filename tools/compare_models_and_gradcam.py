@@ -53,7 +53,7 @@ def load_zero_shot_encoder(args_ns: SimpleNamespace) -> CLIPEncoder:
 
 
 def load_finetuned_encoder(args_ns: SimpleNamespace, checkpoint_path: str, device: str) -> CLIPEncoder:
-    # Mirror carot_loss style: instantiate then load via instance method
+    # Mirror CLIP fine-tuning style: instantiate then load via instance method
     enc = CLIPEncoder(args_ns, keep_lang=True)
     enc = enc.load(checkpoint_path)
     enc = enc.to(device)
@@ -277,7 +277,7 @@ def compute_alignment_and_uniformity(clip_encoder: CLIPEncoder,
 def main():
     parser = argparse.ArgumentParser(description="Compare zero-shot and fine-tuned CLIP encoders: Grad-CAM + alignment/uniformity")
     parser.add_argument('--checkpoint', type=str, default=None, help='Path to finetuned CLIPEncoder checkpoint_*.pt')
-    parser.add_argument('--clip_load', type=str, default=None, help='Alias for --checkpoint to mirror carot_loss')
+    parser.add_argument('--clip_load', type=str, default=None, help='Alias for --checkpoint')
     parser.add_argument('--dataset', type=str, default='ImageNet', help='Dataset class name from src.datasets_ (e.g., ImageNet, ImageNetV2, ImageNetR, ImageNetA, ImageNetSketch, ObjectNet)')
     parser.add_argument('--data-location', type=str, required=True, help='Root path containing datasets (same as training)')
     parser.add_argument('--model', type=str, default='ViT-L/14', help='CLIP model name (must match training, e.g. ViT-L/14)')
@@ -323,7 +323,7 @@ def main():
     dataset = get_dataset(ft_enc.val_preprocess, args_local.dataset, args_local.data_location, args_local.batch_size, args_local.workers)
     dataloader = dataset.train_loader
 
-    # Build zero-shot heads (consistent with carot evaluation)
+    # Build zero-shot heads (consistent with repo evaluation)
     print('Building zero-shot classification heads...')
     zs_head_for_zs = build_zeroshot_head(zs_args, zs_enc.model).to(args_local.device)
     zs_head_for_ft = build_zeroshot_head(zs_args, ft_enc.model).to(args_local.device)
