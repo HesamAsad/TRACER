@@ -75,9 +75,9 @@ If you use this code or the paper, please cite:
 
 ```bibtex
 @inproceedings{
-anonymous2026tracer,
+asadollahzadeh2026tracer,
 title={{TRACER}: Persistent Regularization for Robust Multimodal Finetuning},
-author={Anonymous},
+author={Asadollahzadeh, Hesam and Liu, Feng and Leckie, Christopher and Erfani, Sarah M.},
 booktitle={Forty-third International Conference on Machine Learning},
 year={2026},
 url={https://openreview.net/forum?id=XOYXLQRlj8}
@@ -85,8 +85,6 @@ url={https://openreview.net/forum?id=XOYXLQRlj8}
 ```
 
 </details>
-
-*Under blind review, keep `author={Anonymous}`; for camera-ready, replace with the final author list.*
 
 ---
 
