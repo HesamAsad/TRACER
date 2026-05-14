@@ -55,6 +55,22 @@ The student is optimized with **L<sub>MMCL</sub>**; the teacher supplies **L<sub
 
 ---
 
+## Quick start
+
+```bash
+export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+# Adjust dataset paths inside the script first:
+bash example_scripts/tracer.sh
+```
+
+```bash
+python src/main.py --help
+```
+
+For all training flags, see [`src/args.py`](src/args.py).
+
+---
+
 ## Repository layout
 
 | Path | Role |
@@ -86,18 +102,3 @@ url={https://openreview.net/forum?id=XOYXLQRlj8}
 
 </details>
 
----
-
-## Quick start
-
-```bash
-export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-# Adjust dataset paths inside the script first:
-bash example_scripts/tracer.sh
-```
-
-```bash
-python src/main.py --help
-```
-
-For all training flags, see [`src/args.py`](src/args.py).
