@@ -43,7 +43,7 @@ The student is optimized with **L<sub>MMCL</sub>**; the teacher supplies **L<sub
 >
 > Classical **EMA teachers** progressively weaken their regularizing gap to the student. **Weighted moving-average (WMA) teachers** integrate the **optimization trajectory** and retain meaningful regularization over finite horizons. **TRACER** combines multimodal contrastive learning with **WMA-guided**, multi-perspective distillation. On CLIP fine-tuning, TRACER yields consistent **OOD accuracy and calibration** gains across architectures, backed by thorough **ablations** over distillation components, regularization strength, teacher update schedules, and kernel shape.
 
-<p align="center"><strong>Keywords</strong><br><em>Multimodal contrastive learning · Fine-tuning · Robustness · Self-distillation</em></p>
+<p align="center"><strong>Keywords</strong><br><em>Multi-modal Contrastive Learning · Robust Fine-tuning · Distributional Robustness · Self-distillation</em></p>
 
 ---
 
