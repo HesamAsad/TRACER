@@ -1,14 +1,14 @@
 <div align="center">
 
-# TRACER
+# TRACER [ICML 2026]
 
 ### Persistent Regularization for Robust Multimodal Finetuning
 
-**Hesam Asadollahzadeh**, **Feng Liu**, **Christopher Leckie**, **Sarah M. Erfani** · *University of Melbourne* · **ICML&nbsp;2026** · [OpenReview](https://openreview.net/forum?id=XOYXLQRlj8)
-
-*Official PyTorch code for **TRACER** — **T**rajectory-**R**obust **A**nchoring for **C**ontrastive **E**ncoder **R**egularization.*
+**Hesam Asadollahzadeh**, **Feng Liu**, **Christopher Leckie**, **Sarah M. Erfani** · *University of Melbourne* · [OpenReview](https://openreview.net/forum?id=XOYXLQRlj8)
 
 *Corresponding author:* [h.asadollahzadeh@unimelb.edu.au](mailto:h.asadollahzadeh@unimelb.edu.au)
+
+*Official PyTorch code for **TRACER** — **T**rajectory-**R**obust **A**nchoring for **C**ontrastive **E**ncoder **R**egularization.*
 
 <br>
 
@@ -16,7 +16,7 @@
 
 <br>
 
-**Figure 1.** TRACER couples multimodal contrastive learning with self-distillation from a **weighted moving-average (WMA)** teacher trained along the trajectory.  
+TRACER couples multimodal contrastive learning with self-distillation from a **weighted moving-average (WMA)** teacher trained along the trajectory.  
 The student is optimized with **L<sub>MMCL</sub>**; the teacher supplies **L<sub>SD-WMA</sub>** to preserve orthogonal pretrained structure while adapting in the task subspace (see Algorithm 1 in the paper).
 
 <br>
